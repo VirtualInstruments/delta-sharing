@@ -17,11 +17,12 @@ data:
     port: 8080
     endpoint: "/delta-sharing"
     preSignedUrlTimeoutSeconds: 3600
-    deltaTableCacheSize: 5
+    deltaTableCacheSize: 100
     stalenessAcceptable: true
     evaluatePredicateHints: false
     evaluateJsonPredicateHints: true
     evaluateJsonPredicateHintsV2: true
+    requestTimeoutSeconds: 180
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
