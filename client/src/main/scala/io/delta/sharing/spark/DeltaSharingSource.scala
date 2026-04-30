@@ -255,13 +255,8 @@ case class DeltaSharingSource(
       // We need to apply this check because the spark streaming engine assumes the DataSource is
       // stateless, and sortedFetchedFiles makes DeltaSharingSource stateful.
       val headFile = sortedFetchedFiles.head
-      // After a batch, previousOffset.index is the last *consumed* file index in that version.
-      // The next file must be at index (fromIndex + 1). Treat only replay (head.index <= fromIndex)
-      // or a skipped index (head.index > fromIndex + 1) as inconsistency; head.index == fromIndex + 1
-      // is the expected continuation and must not clear the cache
-      val sameVersionIndexGapOrReplay = headFile.version == fromVersion && fromIndex != -1 && (
-        headFile.index <= fromIndex || headFile.index > fromIndex + 1)
-      if (headFile.version > fromVersion || sameVersionIndexGapOrReplay ||
+      if (headFile.version > fromVersion || (
+        headFile.version == fromVersion && headFile.index > fromIndex && fromIndex != -1) ||
         (isStartingVersion != headFile.isSnapshot)) {
         val lastFile = sortedFetchedFiles.last
         logWarning(s"The asked file(" +
