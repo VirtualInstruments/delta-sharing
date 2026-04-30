@@ -37,18 +37,25 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
       .build[String, DeltaSharedTable]()
   }
 
-  def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
+  /**
+   * @return table handle and time spent in `deltaLog.update()`
+   */
+  def loadTableWithUpdateCost(
+      tableConfig: TableConfig,
+      useKernel: Boolean = false): (DeltaSharedTableProtocol, Long) = {
     if (useKernel) {
-      return new DeltaSharedTableKernel(
-        tableConfig,
-        serverConfig.preSignedUrlTimeoutSeconds,
-        serverConfig.evaluatePredicateHints,
-        serverConfig.evaluateJsonPredicateHints,
-        serverConfig.evaluateJsonPredicateHintsV2,
-        serverConfig.queryTablePageSizeLimit,
-        serverConfig.queryTablePageTokenTtlMs,
-        serverConfig.refreshTokenTtlMs
-      )
+      return (
+        new DeltaSharedTableKernel(
+          tableConfig,
+          serverConfig.preSignedUrlTimeoutSeconds,
+          serverConfig.evaluatePredicateHints,
+          serverConfig.evaluateJsonPredicateHints,
+          serverConfig.evaluateJsonPredicateHintsV2,
+          serverConfig.queryTablePageSizeLimit,
+          serverConfig.queryTablePageTokenTtlMs,
+          serverConfig.refreshTokenTtlMs
+        ),
+        0L)
     }
     try {
       val deltaSharedTable =
@@ -67,13 +74,20 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
             )
           }
         )
+      var updateMs = 0L
       if (!serverConfig.stalenessAcceptable) {
+        val u0 = System.currentTimeMillis()
         deltaSharedTable.update()
+        updateMs = System.currentTimeMillis() - u0
       }
-      deltaSharedTable
+      (deltaSharedTable, updateMs)
     } catch {
       case CausedBy(e: DeltaSharingUnsupportedOperationException) => throw e
       case e: Throwable => throw e
     }
+  }
+
+  def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
+    loadTableWithUpdateCost(tableConfig, useKernel)._1
   }
 }

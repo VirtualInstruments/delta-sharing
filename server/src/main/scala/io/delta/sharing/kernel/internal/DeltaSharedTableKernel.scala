@@ -273,7 +273,9 @@ class DeltaSharedTableKernel(
       refreshToken: Option[String],
       responseFormatSet: Set[String],
       clientReaderFeaturesSet: Set[String],
-      includeEndStreamQuery: Boolean): QueryResult = withClassLoader {
+      includeEndStreamQuery: Boolean,
+      deltaLogUpdateMs: Long = 0L,
+      requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult = withClassLoader {
 
     if (Seq(version, timestamp, startingVersion).filter(_.isDefined).size >= 2) {
       throw new DeltaSharingIllegalArgumentException(
@@ -385,7 +387,9 @@ class DeltaSharedTableKernel(
       maxFiles: Option[Int],
       pageToken: Option[String],
       responseFormatSet: Set[String] = Set("parquet"),
-      includeEndStreamAction: Boolean): QueryResult = {
+      includeEndStreamAction: Boolean,
+      deltaLogUpdateMs: Long = 0L,
+      requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult = {
 
     throw new DeltaSharingUnsupportedOperationException("not implemented yet")
   }

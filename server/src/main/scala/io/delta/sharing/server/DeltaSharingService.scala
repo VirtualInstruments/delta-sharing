@@ -189,6 +189,67 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val deltaSharedTableLoader = new DeltaSharedTableLoader(serverConfig)
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
+
+  private def logCdfRequestComplete(
+      wallStartMs: Long,
+      share: String,
+      schema: String,
+      table: String,
+      queryResult: QueryResult): Unit = {
+    val totalMs = System.currentTimeMillis() - wallStartMs
+    val path = s"$share/$schema/$table"
+    val numSigned = queryResult.actions.length - 2
+    queryResult.timings match {
+      case Some(CdfTimings(t: CdfQueryTimings)) =>
+        logger.info(
+          s"Took ${totalMs}ms wall for cdf on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
+            s"protocolSnapshot=${t.protocolSnapshotMs}ms " +
+            s"getChanges=${t.getChangesMs}ms timestampIndex=${t.timestampIndexMs}ms " +
+            s"cdcSpecBuild=${t.cdcSpecBuildMs}ms signing=${t.signingMs}ms " +
+            s"cdfReplay=${t.cdfReplayMs}ms versions=${t.versionsIterated} " +
+            s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
+      case _ =>
+        logger.info(
+          s"Took ${totalMs}ms to load the table cdf and sign $numSigned urls for table $path")
+    }
+    val limMs = serverConfig.requestTimeoutSeconds.toLong * 1000L
+    if (limMs > 0 && totalMs > (limMs * 3) / 4) {
+      logger.warn(
+        s"CDF request wall time ${totalMs}ms exceeds 75% of request timeout " +
+          s"(${serverConfig.requestTimeoutSeconds}s) for $path")
+    }
+  }
+
+  private def logTableQueryComplete(
+      wallStartMs: Long,
+      share: String,
+      schema: String,
+      table: String,
+      queryResult: QueryResult): Unit = {
+    val totalMs = System.currentTimeMillis() - wallStartMs
+    val path = s"$share/$schema/$table"
+    val numSigned = queryResult.actions.length - 2
+    queryResult.timings match {
+      case Some(TableTimings(t: TableQueryTimings)) =>
+        val verPart = (t.versionsIterated, t.queryStartVersion, t.queryEndVersion) match {
+          case (Some(vc), Some(sv), Some(ev)) => s" versions=$vc range=[$sv,$ev]"
+          case _ => ""
+        }
+        logger.info(
+          s"Took ${totalMs}ms wall for query on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
+            s"snapshotResolve=${t.snapshotResolveMs}ms replayOrPrepare=${t.replayOrPrepareMs}ms " +
+            s"signing=${t.signingMs}ms signedUrls=$numSigned$verPart")
+      case _ =>
+        logger.info(s"Took ${totalMs}ms to load the table and sign $numSigned urls for table $path")
+    }
+    val limMs = serverConfig.requestTimeoutSeconds.toLong * 1000L
+    if (limMs > 0 && totalMs > (limMs * 3) / 4) {
+      logger.warn(
+        s"Table query wall time ${totalMs}ms exceeds 75% of request timeout " +
+          s"(${serverConfig.requestTimeoutSeconds}s) for $path")
+    }
+  }
+
   /**
    * Call `func` and catch any unhandled exception and convert it to `DeltaInternalException`. Any
    * code that processes requests should use this method to ensure that unhandled exceptions are
@@ -500,12 +561,15 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       val responseFormatSet = getResponseFormatSet(capabilitiesMap)
       val clientReaderFeaturesSet = getReaderFeatures(capabilitiesMap)
       val includeEndStreamAction = getRequestEndStreamAction(capabilitiesMap)
+      val timeoutLog = Some(serverConfig.requestTimeoutSeconds)
       val queryResult = if (
         request.predicateHints.isEmpty
           && request.maxFiles.isEmpty
           && request.startingVersion.isEmpty
           && request.pageToken.isEmpty) {
-        deltaSharedTableLoader.loadTable(tableConfig, useKernel = true).query(
+        val (loaded, updateMs) =
+          deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = true)
+        loaded.query(
           includeFiles = true,
           request.predicateHints,
           request.jsonPredicateHints,
@@ -520,9 +584,13 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           request.refreshToken,
           responseFormatSet = responseFormatSet,
           clientReaderFeaturesSet = clientReaderFeaturesSet,
-          includeEndStreamAction = includeEndStreamAction)
+          includeEndStreamAction = includeEndStreamAction,
+          deltaLogUpdateMs = updateMs,
+          requestTimeoutSecondsForLogging = timeoutLog)
       } else {
-        deltaSharedTableLoader.loadTable(tableConfig, useKernel = false).query(
+        val (loaded, updateMs) =
+          deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = false)
+        loaded.query(
           includeFiles = true,
           request.predicateHints,
           request.jsonPredicateHints,
@@ -537,7 +605,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           request.refreshToken,
           responseFormatSet = responseFormatSet,
           clientReaderFeaturesSet = Set.empty[String],
-          includeEndStreamAction = includeEndStreamAction)
+          includeEndStreamAction = includeEndStreamAction,
+          deltaLogUpdateMs = updateMs,
+          requestTimeoutSecondsForLogging = timeoutLog)
       }
 
       if (queryResult.version < tableConfig.startVersion) {
@@ -545,8 +615,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           s"You can only query table data since version ${tableConfig.startVersion}."
         )
       }
-      logger.info(s"Took ${System.currentTimeMillis - start} ms to load the table " +
-        s"and sign ${queryResult.actions.length - 2} urls for table $share/$schema/$table")
+      logTableQueryComplete(start, share, schema, table, queryResult)
       streamingOutput(
         Some(queryResult.version),
         queryResult.responseFormat,
@@ -588,7 +657,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
     val responseFormatSet = getResponseFormatSet(capabilitiesMap)
     val includeEndStreamAction = getRequestEndStreamAction(capabilitiesMap)
-    val queryResult = deltaSharedTableLoader.loadTable(tableConfig).queryCDF(
+    val (deltaTable, updateMs) = deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig)
+    val queryResult = deltaTable.queryCDF(
       getCdfOptionsMap(
         Option(startingVersion),
         Option(endingVersion),
@@ -599,10 +669,11 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       Option(maxFiles).map(_.toInt),
       Option(pageToken),
       responseFormatSet = responseFormatSet,
-      includeEndStreamAction
+      includeEndStreamAction = includeEndStreamAction,
+      deltaLogUpdateMs = updateMs,
+      requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
-    logger.info(s"Took ${System.currentTimeMillis - start} ms to load the table cdf " +
-      s"and sign ${queryResult.actions.length - 2} urls for table $share/$schema/$table")
+    logCdfRequestComplete(start, share, schema, table, queryResult)
     streamingOutput(
       Some(queryResult.version),
       queryResult.responseFormat,
