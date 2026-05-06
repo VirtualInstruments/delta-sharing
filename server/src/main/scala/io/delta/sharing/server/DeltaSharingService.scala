@@ -239,8 +239,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
             case _ => ""
           }
           logger.info(
-            s"Took ${totalMs}ms wall for query on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
-              s"snapshotResolve=${t.snapshotResolveMs}ms replayOrPrepare=${t.replayOrPrepareMs}ms " +
+            s"Took ${totalMs}ms wall for query on $path; " +
+              s"deltaLog.update=${t.deltaLogUpdateMs}ms " +
+              s"snapshotResolve=${t.snapshotResolveMs}ms " +
+              s"replayOrPrepare=${t.replayOrPrepareMs}ms " +
               s"signing=${t.signingMs}ms signedUrls=$numSigned$verPart")
         case _ =>
           logger.info(
