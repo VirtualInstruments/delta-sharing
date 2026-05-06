@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 
 import com.google.common.cache.CacheBuilder
 import io.delta.standalone.internal.DeltaSharedTable
+import org.slf4j.LoggerFactory
 
 import io.delta.sharing.kernel.internal.DeltaSharedTableKernel
 import io.delta.sharing.server.config.{ServerConfig, TableConfig}
@@ -30,11 +31,20 @@ import io.delta.sharing.server.config.{ServerConfig, TableConfig}
  * to speed up the loading.
  */
 class DeltaSharedTableLoader(serverConfig: ServerConfig) {
+  private val logger = LoggerFactory.getLogger(classOf[DeltaSharedTableLoader])
+
   private val deltaSharedTableCache = {
     CacheBuilder.newBuilder()
       .expireAfterAccess(60, TimeUnit.MINUTES)
       .maximumSize(serverConfig.deltaTableCacheSize)
       .build[String, DeltaSharedTable]()
+  }
+
+  private def measureExecTime[T](code: => T): (T, Long) = {
+    val start = System.nanoTime()
+    val result = code
+    val elapsedMs = (System.nanoTime() - start) / 1000000L
+    (result, elapsedMs)
   }
 
   /**
@@ -76,9 +86,8 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
         )
       var updateMs = 0L
       if (!serverConfig.stalenessAcceptable) {
-        val u0 = System.currentTimeMillis()
-        deltaSharedTable.update()
-        updateMs = System.currentTimeMillis() - u0
+        val (_, elapsed) = measureExecTime(deltaSharedTable.update())
+        updateMs = elapsed
       }
       (deltaSharedTable, updateMs)
     } catch {
@@ -88,6 +97,10 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
   }
 
   def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
-    loadTableWithUpdateCost(tableConfig, useKernel)._1
+    val (table, updateMs) = loadTableWithUpdateCost(tableConfig, useKernel)
+    if (updateMs > 0 && serverConfig.perfLoggingEnabled) {
+      logger.info(s"deltaLog.update took ${updateMs}ms for ${tableConfig.location}")
+    }
+    table
   }
 }

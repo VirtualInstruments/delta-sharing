@@ -191,26 +191,28 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
 
   private def logCdfRequestComplete(
-      wallStartMs: Long,
+      wallStartNs: Long,
       share: String,
       schema: String,
       table: String,
       queryResult: QueryResult): Unit = {
-    val totalMs = System.currentTimeMillis() - wallStartMs
+    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
     val path = s"$share/$schema/$table"
     val numSigned = queryResult.actions.length - 2
-    queryResult.timings match {
-      case Some(CdfTimings(t: CdfQueryTimings)) =>
-        logger.info(
-          s"Took ${totalMs}ms wall for cdf on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
-            s"protocolSnapshot=${t.protocolSnapshotMs}ms " +
-            s"getChanges=${t.getChangesMs}ms timestampIndex=${t.timestampIndexMs}ms " +
-            s"cdcSpecBuild=${t.cdcSpecBuildMs}ms signing=${t.signingMs}ms " +
-            s"cdfReplay=${t.cdfReplayMs}ms versions=${t.versionsIterated} " +
-            s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
-      case _ =>
-        logger.info(
-          s"Took ${totalMs}ms to load the table cdf and sign $numSigned urls for table $path")
+    if (serverConfig.perfLoggingEnabled) {
+      queryResult.timings match {
+        case Some(CdfTimings(t: CdfQueryTimings)) =>
+          logger.info(
+            s"Took ${totalMs}ms wall for cdf on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
+              s"protocolSnapshot=${t.protocolSnapshotMs}ms " +
+              s"getChanges=${t.getChangesMs}ms timestampIndex=${t.timestampIndexMs}ms " +
+              s"cdcSpecBuild=${t.cdcSpecBuildMs}ms signing=${t.signingMs}ms " +
+              s"cdfReplay=${t.cdfReplayMs}ms versions=${t.versionsIterated} " +
+              s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
+        case _ =>
+          logger.info(
+            s"Took ${totalMs}ms to load the table cdf and sign $numSigned urls for table $path")
+      }
     }
     val limMs = serverConfig.requestTimeoutSeconds.toLong * 1000L
     if (limMs > 0 && totalMs > (limMs * 3) / 4) {
@@ -221,26 +223,29 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   }
 
   private def logTableQueryComplete(
-      wallStartMs: Long,
+      wallStartNs: Long,
       share: String,
       schema: String,
       table: String,
       queryResult: QueryResult): Unit = {
-    val totalMs = System.currentTimeMillis() - wallStartMs
+    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
     val path = s"$share/$schema/$table"
     val numSigned = queryResult.actions.length - 2
-    queryResult.timings match {
-      case Some(TableTimings(t: TableQueryTimings)) =>
-        val verPart = (t.versionsIterated, t.queryStartVersion, t.queryEndVersion) match {
-          case (Some(vc), Some(sv), Some(ev)) => s" versions=$vc range=[$sv,$ev]"
-          case _ => ""
-        }
-        logger.info(
-          s"Took ${totalMs}ms wall for query on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
-            s"snapshotResolve=${t.snapshotResolveMs}ms replayOrPrepare=${t.replayOrPrepareMs}ms " +
-            s"signing=${t.signingMs}ms signedUrls=$numSigned$verPart")
-      case _ =>
-        logger.info(s"Took ${totalMs}ms to load the table and sign $numSigned urls for table $path")
+    if (serverConfig.perfLoggingEnabled) {
+      queryResult.timings match {
+        case Some(TableTimings(t: TableQueryTimings)) =>
+          val verPart = (t.versionsIterated, t.queryStartVersion, t.queryEndVersion) match {
+            case (Some(vc), Some(sv), Some(ev)) => s" versions=$vc range=[$sv,$ev]"
+            case _ => ""
+          }
+          logger.info(
+            s"Took ${totalMs}ms wall for query on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
+              s"snapshotResolve=${t.snapshotResolveMs}ms replayOrPrepare=${t.replayOrPrepareMs}ms " +
+              s"signing=${t.signingMs}ms signedUrls=$numSigned$verPart")
+        case _ =>
+          logger.info(
+            s"Took ${totalMs}ms to load the table and sign $numSigned urls for table $path")
+      }
     }
     val limMs = serverConfig.requestTimeoutSeconds.toLong * 1000L
     if (limMs > 0 && totalMs > (limMs * 3) / 4) {
@@ -523,7 +528,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       )
     }
 
-    val start = System.currentTimeMillis
+    val start = System.nanoTime()
 
     if(getAsyncQuery(capabilitiesMap)) {
       val queryId = s"${share}_${schema}_${table}"
@@ -648,7 +653,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     val capabilitiesMap = getDeltaSharingCapabilitiesMap(
       req.headers().get(DELTA_SHARING_CAPABILITIES_HEADER)
     )
-    val start = System.currentTimeMillis
+    val start = System.nanoTime()
     val tableConfig = sharedTableManager.getTable(share, schema, table)
     if (!tableConfig.historyShared) {
       throw new DeltaSharingIllegalArgumentException("cdf is not enabled on table " +
