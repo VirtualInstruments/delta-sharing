@@ -43,8 +43,8 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
   private def measureExecTime[T](code: => T): (T, Long) = {
     val start = System.nanoTime()
     val result = code
-    val elapsedMs = (System.nanoTime() - start) / 1000000L
-    (result, elapsedMs)
+    val elapsedNs = System.nanoTime() - start
+    (result, elapsedNs)
   }
 
   /**
@@ -84,12 +84,12 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
             )
           }
         )
-      var updateMs = 0L
+      var updateNs = 0L
       if (!serverConfig.stalenessAcceptable) {
         val (_, elapsed) = measureExecTime(deltaSharedTable.update())
-        updateMs = elapsed
+        updateNs = elapsed
       }
-      (deltaSharedTable, updateMs)
+      (deltaSharedTable, updateNs)
     } catch {
       case CausedBy(e: DeltaSharingUnsupportedOperationException) => throw e
       case e: Throwable => throw e
@@ -97,9 +97,9 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
   }
 
   def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
-    val (table, updateMs) = loadTableWithUpdateCost(tableConfig, useKernel)
-    if (updateMs > 0 && serverConfig.perfLoggingEnabled) {
-      logger.info(s"deltaLog.update took ${updateMs}ms for ${tableConfig.location}")
+    val (table, updateNs) = loadTableWithUpdateCost(tableConfig, useKernel)
+    if (updateNs > 0 && serverConfig.perfLoggingEnabled) {
+      logger.info(s"deltaLog.update took ${updateNs / 1000000}ms for ${tableConfig.location}")
     }
     table
   }

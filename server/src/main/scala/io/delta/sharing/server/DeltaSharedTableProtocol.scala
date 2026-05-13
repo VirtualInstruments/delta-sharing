@@ -31,23 +31,23 @@ case class CdfQueryTimings(
     cdfStartVersion: Long,
     cdfEndVersion: Long,
     versionsIterated: Int,
-    deltaLogUpdateMs: Long,
-    protocolSnapshotMs: Long,
-    getChangesMs: Long,
-    timestampIndexMs: Long,
-    cdcSpecBuildMs: Long,
-    signingMs: Long) {
+    deltaLogUpdateNs: Long,
+    protocolSnapshotNs: Long,
+    getChangesNs: Long,
+    timestampIndexNs: Long,
+    cdcSpecBuildNs: Long,
+    signingNs: Long) {
 
-  def cdfReplayMs: Long = getChangesMs + timestampIndexMs + cdcSpecBuildMs
+  def cdfReplayNs: Long = getChangesNs + timestampIndexNs + cdcSpecBuildNs
 }
 
 /** Observability breakdown for /query (table data) requests. */
 case class TableQueryTimings(
-    deltaLogUpdateMs: Long,
-    snapshotResolveMs: Long,
+    deltaLogUpdateNs: Long,
+    snapshotResolveNs: Long,
     /** Incr. query: ts index + scan; snapshot: predicate/file prep. */
-    replayOrPrepareMs: Long,
-    signingMs: Long,
+    replayOrPrepareNs: Long,
+    signingNs: Long,
     versionsIterated: Option[Int],
     queryStartVersion: Option[Long],
     queryEndVersion: Option[Long])
@@ -76,7 +76,7 @@ trait DeltaSharedTableProtocol {
       responseFormatSet: Set[String],
       clientReaderFeaturesSet: Set[String],
       includeEndStreamAction: Boolean,
-      deltaLogUpdateMs: Long = 0L,
+      deltaLogUpdateNs: Long = 0L,
       requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult
 
   def queryCDF(
@@ -86,7 +86,7 @@ trait DeltaSharedTableProtocol {
       pageToken: Option[String],
       responseFormatSet: Set[String] = Set("parquet"),
       includeEndStreamAction: Boolean,
-      deltaLogUpdateMs: Long = 0L,
+      deltaLogUpdateNs: Long = 0L,
       requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult
 
   def validateTable(inputFullHistoryShared: Boolean): Unit = {}

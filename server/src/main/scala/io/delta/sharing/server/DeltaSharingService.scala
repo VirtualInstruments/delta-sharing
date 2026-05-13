@@ -203,11 +203,14 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       queryResult.timings match {
         case Some(CdfTimings(t: CdfQueryTimings)) =>
           logger.info(
-            s"Took ${totalMs}ms wall for cdf on $path; deltaLog.update=${t.deltaLogUpdateMs}ms " +
-              s"protocolSnapshot=${t.protocolSnapshotMs}ms " +
-              s"getChanges=${t.getChangesMs}ms timestampIndex=${t.timestampIndexMs}ms " +
-              s"cdcSpecBuild=${t.cdcSpecBuildMs}ms signing=${t.signingMs}ms " +
-              s"cdfReplay=${t.cdfReplayMs}ms versions=${t.versionsIterated} " +
+            s"Took ${totalMs}ms wall for cdf on $path; " +
+              s"deltaLog.update=${t.deltaLogUpdateNs / 1000000}ms " +
+              s"protocolSnapshot=${t.protocolSnapshotNs / 1000000}ms " +
+              s"getChanges=${t.getChangesNs / 1000000}ms " +
+              s"timestampIndex=${t.timestampIndexNs / 1000000}ms " +
+              s"cdcSpecBuild=${t.cdcSpecBuildNs / 1000000}ms " +
+              s"signing=${t.signingNs / 1000000}ms " +
+              s"cdfReplay=${t.cdfReplayNs / 1000000}ms versions=${t.versionsIterated} " +
               s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
         case _ =>
           logger.info(
@@ -240,10 +243,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           }
           logger.info(
             s"Took ${totalMs}ms wall for query on $path; " +
-              s"deltaLog.update=${t.deltaLogUpdateMs}ms " +
-              s"snapshotResolve=${t.snapshotResolveMs}ms " +
-              s"replayOrPrepare=${t.replayOrPrepareMs}ms " +
-              s"signing=${t.signingMs}ms signedUrls=$numSigned$verPart")
+              s"deltaLog.update=${t.deltaLogUpdateNs / 1000000}ms " +
+              s"snapshotResolve=${t.snapshotResolveNs / 1000000}ms " +
+              s"replayOrPrepare=${t.replayOrPrepareNs / 1000000}ms " +
+              s"signing=${t.signingNs / 1000000}ms signedUrls=$numSigned$verPart")
         case _ =>
           logger.info(
             s"Took ${totalMs}ms to load the table and sign $numSigned urls for table $path")
@@ -574,7 +577,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           && request.maxFiles.isEmpty
           && request.startingVersion.isEmpty
           && request.pageToken.isEmpty) {
-        val (loaded, updateMs) =
+        val (loaded, updateNs) =
           deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = true)
         loaded.query(
           includeFiles = true,
@@ -592,10 +595,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           responseFormatSet = responseFormatSet,
           clientReaderFeaturesSet = clientReaderFeaturesSet,
           includeEndStreamAction = includeEndStreamAction,
-          deltaLogUpdateMs = updateMs,
+          deltaLogUpdateNs = updateNs,
           requestTimeoutSecondsForLogging = timeoutLog)
       } else {
-        val (loaded, updateMs) =
+        val (loaded, updateNs) =
           deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = false)
         loaded.query(
           includeFiles = true,
@@ -613,7 +616,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           responseFormatSet = responseFormatSet,
           clientReaderFeaturesSet = Set.empty[String],
           includeEndStreamAction = includeEndStreamAction,
-          deltaLogUpdateMs = updateMs,
+          deltaLogUpdateNs = updateNs,
           requestTimeoutSecondsForLogging = timeoutLog)
       }
 
@@ -664,7 +667,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
     val responseFormatSet = getResponseFormatSet(capabilitiesMap)
     val includeEndStreamAction = getRequestEndStreamAction(capabilitiesMap)
-    val (deltaTable, updateMs) = deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig)
+    val (deltaTable, updateNs) = deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig)
     val queryResult = deltaTable.queryCDF(
       getCdfOptionsMap(
         Option(startingVersion),
@@ -677,7 +680,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       Option(pageToken),
       responseFormatSet = responseFormatSet,
       includeEndStreamAction = includeEndStreamAction,
-      deltaLogUpdateMs = updateMs,
+      deltaLogUpdateNs = updateNs,
       requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
     logCdfRequestComplete(start, share, schema, table, queryResult)

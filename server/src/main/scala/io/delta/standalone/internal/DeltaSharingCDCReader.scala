@@ -45,9 +45,9 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
   /** Result of log replay for CDF (no URL signing). */
   case class CdcQueryReplayOutcome(
       specs: Seq[CDCDataSpec],
-      getChangesMaterializeMs: Long,
-      timestampIndexMs: Long,
-      cdcSpecBuildMs: Long)
+      getChangesMaterializeNs: Long,
+      timestampIndexNs: Long,
+      cdcSpecBuildNs: Long)
 
   private lazy val snapshot = deltaLog.snapshot
   lazy val protocol = snapshot.protocolScala
@@ -207,14 +207,14 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
       throw DeltaCDFErrors.changeDataNotRecordedException(start, start, end)
     }
 
-    val tGetChanges = System.currentTimeMillis()
+    val tGetChanges = System.nanoTime()
     val changes = deltaLog.getChanges(start, false).asScala.takeWhile(_.getVersion <= end)
     val changesVector = changes.toVector
-    val getChangesMaterializeMs = System.currentTimeMillis() - tGetChanges
+    val getChangesMaterializeNs = System.nanoTime() - tGetChanges
 
     // Correct timestamp values are only available through
     // DeltaHistoryManager.getTimestampsByVersion
-    val tTs = System.currentTimeMillis()
+    val tTs = System.nanoTime()
     val timestampsByVersion = DeltaSharingHistoryManager.getTimestampsByVersion(
       deltaLog.store,
       deltaLog.logPath,
@@ -222,9 +222,9 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
       end + 1,
       conf
     )
-    val timestampIndexMs = System.currentTimeMillis() - tTs
+    val timestampIndexNs = System.nanoTime() - tTs
 
-    val tBuild = System.currentTimeMillis()
+    val tBuild = System.nanoTime()
     val cdcSpecs = ListBuffer[CDCDataSpec]()
 
     changesVector.foreach { versionLog =>
@@ -296,12 +296,12 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
         cdcSpecs.append(CDCDataSpec(v, ts, selectedActions.toSeq))
     }
 
-    val cdcSpecBuildMs = System.currentTimeMillis() - tBuild
+    val cdcSpecBuildNs = System.nanoTime() - tBuild
     CdcQueryReplayOutcome(
       cdcSpecs.toSeq,
-      getChangesMaterializeMs,
-      timestampIndexMs,
-      cdcSpecBuildMs)
+      getChangesMaterializeNs,
+      timestampIndexNs,
+      cdcSpecBuildNs)
   }
 
   case class CDCDataSpec(version: Long, timestamp: Timestamp, actions: Seq[Action])

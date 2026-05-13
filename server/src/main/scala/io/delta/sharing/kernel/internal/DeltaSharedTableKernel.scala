@@ -274,7 +274,7 @@ class DeltaSharedTableKernel(
       responseFormatSet: Set[String],
       clientReaderFeaturesSet: Set[String],
       includeEndStreamQuery: Boolean,
-      deltaLogUpdateMs: Long = 0L,
+      deltaLogUpdateNs: Long = 0L,
       requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult = withClassLoader {
 
     if (Seq(version, timestamp, startingVersion).filter(_.isDefined).size >= 2) {
@@ -388,7 +388,7 @@ class DeltaSharedTableKernel(
       pageToken: Option[String],
       responseFormatSet: Set[String] = Set("parquet"),
       includeEndStreamAction: Boolean,
-      deltaLogUpdateMs: Long = 0L,
+      deltaLogUpdateNs: Long = 0L,
       requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult = {
 
     throw new DeltaSharingUnsupportedOperationException("not implemented yet")
