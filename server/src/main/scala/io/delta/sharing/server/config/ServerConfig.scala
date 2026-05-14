@@ -65,7 +65,9 @@ case class ServerConfig(
     // The TTL of the page token generated in queryTable/queryTableChanges API (in milliseconds).
     @BeanProperty var queryTablePageTokenTtlMs: Int,
     // The TTL of the refresh token generated in queryTable API (in milliseconds).
-    @BeanProperty var refreshTokenTtlMs: Int
+    @BeanProperty var refreshTokenTtlMs: Int,
+    // Whether to emit performance/timing log lines for table queries and CDF requests.
+    @BeanProperty var perfLoggingEnabled: Boolean
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -88,7 +90,8 @@ case class ServerConfig(
       requestTimeoutSeconds = 30,
       queryTablePageSizeLimit = 10000,
       queryTablePageTokenTtlMs = 259200000, // 3 days
-      refreshTokenTtlMs = 3600000 // 1 hour
+      refreshTokenTtlMs = 3600000, // 1 hour
+      perfLoggingEnabled = true
     )
   }
 

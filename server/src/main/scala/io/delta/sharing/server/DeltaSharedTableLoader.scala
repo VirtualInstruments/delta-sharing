@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 
 import com.google.common.cache.CacheBuilder
 import io.delta.standalone.internal.DeltaSharedTable
+import org.slf4j.LoggerFactory
 
 import io.delta.sharing.kernel.internal.DeltaSharedTableKernel
 import io.delta.sharing.server.config.{ServerConfig, TableConfig}
@@ -30,6 +31,8 @@ import io.delta.sharing.server.config.{ServerConfig, TableConfig}
  * to speed up the loading.
  */
 class DeltaSharedTableLoader(serverConfig: ServerConfig) {
+  private val logger = LoggerFactory.getLogger(classOf[DeltaSharedTableLoader])
+
   private val deltaSharedTableCache = {
     CacheBuilder.newBuilder()
       .expireAfterAccess(60, TimeUnit.MINUTES)
@@ -37,18 +40,32 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
       .build[String, DeltaSharedTable]()
   }
 
-  def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
+  private def measureExecTime[T](code: => T): (T, Long) = {
+    val start = System.nanoTime()
+    val result = code
+    val elapsedNs = System.nanoTime() - start
+    (result, elapsedNs)
+  }
+
+  /**
+   * @return table handle and time spent in `deltaLog.update()`
+   */
+  def loadTableWithUpdateCost(
+      tableConfig: TableConfig,
+      useKernel: Boolean = false): (DeltaSharedTableProtocol, Long) = {
     if (useKernel) {
-      return new DeltaSharedTableKernel(
-        tableConfig,
-        serverConfig.preSignedUrlTimeoutSeconds,
-        serverConfig.evaluatePredicateHints,
-        serverConfig.evaluateJsonPredicateHints,
-        serverConfig.evaluateJsonPredicateHintsV2,
-        serverConfig.queryTablePageSizeLimit,
-        serverConfig.queryTablePageTokenTtlMs,
-        serverConfig.refreshTokenTtlMs
-      )
+      return (
+        new DeltaSharedTableKernel(
+          tableConfig,
+          serverConfig.preSignedUrlTimeoutSeconds,
+          serverConfig.evaluatePredicateHints,
+          serverConfig.evaluateJsonPredicateHints,
+          serverConfig.evaluateJsonPredicateHintsV2,
+          serverConfig.queryTablePageSizeLimit,
+          serverConfig.queryTablePageTokenTtlMs,
+          serverConfig.refreshTokenTtlMs
+        ),
+        0L)
     }
     try {
       val deltaSharedTable =
@@ -67,13 +84,23 @@ class DeltaSharedTableLoader(serverConfig: ServerConfig) {
             )
           }
         )
+      var updateNs = 0L
       if (!serverConfig.stalenessAcceptable) {
-        deltaSharedTable.update()
+        val (_, elapsed) = measureExecTime(deltaSharedTable.update())
+        updateNs = elapsed
       }
-      deltaSharedTable
+      (deltaSharedTable, updateNs)
     } catch {
       case CausedBy(e: DeltaSharingUnsupportedOperationException) => throw e
       case e: Throwable => throw e
     }
+  }
+
+  def loadTable(tableConfig: TableConfig, useKernel: Boolean = false): DeltaSharedTableProtocol = {
+    val (table, updateNs) = loadTableWithUpdateCost(tableConfig, useKernel)
+    if (updateNs > 0 && serverConfig.perfLoggingEnabled) {
+      logger.info(s"deltaLog.update took ${updateNs / 1000000}ms for ${tableConfig.location}")
+    }
+    table
   }
 }

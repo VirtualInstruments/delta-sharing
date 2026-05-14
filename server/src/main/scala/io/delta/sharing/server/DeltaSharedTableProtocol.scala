@@ -23,7 +23,39 @@ package io.delta.sharing.server
 case class QueryResult(
     version: Long,
     actions: Seq[Object],
-    responseFormat: String)
+    responseFormat: String,
+    timings: Option[QueryResultTimings] = None)
+
+/** Observability breakdown for /changes (CDF) requests */
+case class CdfQueryTimings(
+    cdfStartVersion: Long,
+    cdfEndVersion: Long,
+    versionsIterated: Int,
+    deltaLogUpdateNs: Long,
+    protocolSnapshotNs: Long,
+    getChangesNs: Long,
+    timestampIndexNs: Long,
+    cdcSpecBuildNs: Long,
+    signingNs: Long) {
+
+  def cdfReplayNs: Long = getChangesNs + timestampIndexNs + cdcSpecBuildNs
+}
+
+/** Observability breakdown for /query (table data) requests. */
+case class TableQueryTimings(
+    deltaLogUpdateNs: Long,
+    snapshotResolveNs: Long,
+    /** Incr. query: ts index + scan; snapshot: predicate/file prep. */
+    replayOrPrepareNs: Long,
+    signingNs: Long,
+    versionsIterated: Option[Int],
+    queryStartVersion: Option[Long],
+    queryEndVersion: Option[Long])
+
+sealed trait QueryResultTimings
+case class CdfTimings(t: CdfQueryTimings) extends QueryResultTimings
+case class TableTimings(t: TableQueryTimings) extends QueryResultTimings
+
 trait DeltaSharedTableProtocol {
   def getTableVersion(startingTimestamp: Option[String]): Long = -1
 
@@ -43,7 +75,9 @@ trait DeltaSharedTableProtocol {
       refreshToken: Option[String],
       responseFormatSet: Set[String],
       clientReaderFeaturesSet: Set[String],
-      includeEndStreamAction: Boolean): QueryResult
+      includeEndStreamAction: Boolean,
+      deltaLogUpdateNs: Long = 0L,
+      requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult
 
   def queryCDF(
       cdfOptions: Map[String, String],
@@ -51,7 +85,9 @@ trait DeltaSharedTableProtocol {
       maxFiles: Option[Int],
       pageToken: Option[String],
       responseFormatSet: Set[String] = Set("parquet"),
-      includeEndStreamAction: Boolean): QueryResult
+      includeEndStreamAction: Boolean,
+      deltaLogUpdateNs: Long = 0L,
+      requestTimeoutSecondsForLogging: Option[Long] = None): QueryResult
 
   def validateTable(inputFullHistoryShared: Boolean): Unit = {}
 

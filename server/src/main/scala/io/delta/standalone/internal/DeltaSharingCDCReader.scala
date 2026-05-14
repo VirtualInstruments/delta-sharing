@@ -42,6 +42,13 @@ import scala.util.control.NonFatal
  */
 class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration) {
 
+  /** Result of log replay for CDF (no URL signing). */
+  case class CdcQueryReplayOutcome(
+      specs: Seq[CDCDataSpec],
+      getChangesMaterializeNs: Long,
+      timestampIndexNs: Long,
+      cdcSpecBuildNs: Long)
+
   private lazy val snapshot = deltaLog.snapshot
   lazy val protocol = snapshot.protocolScala
   lazy val metadata = snapshot.metadataScala
@@ -189,7 +196,7 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
     start: Long,
     end: Long,
     latestVersion: Long,
-    includeHistoricalMetadata: Boolean): Seq[CDCDataSpec] = {
+    includeHistoricalMetadata: Boolean): CdcQueryReplayOutcome = {
     if (start > latestVersion) {
       throw DeltaCDFErrors.startVersionAfterLatestVersion(start, latestVersion)
     }
@@ -200,10 +207,14 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
       throw DeltaCDFErrors.changeDataNotRecordedException(start, start, end)
     }
 
+    val tGetChanges = System.nanoTime()
     val changes = deltaLog.getChanges(start, false).asScala.takeWhile(_.getVersion <= end)
+    val changesVector = changes.toVector
+    val getChangesMaterializeNs = System.nanoTime() - tGetChanges
 
     // Correct timestamp values are only available through
     // DeltaHistoryManager.getTimestampsByVersion
+    val tTs = System.nanoTime()
     val timestampsByVersion = DeltaSharingHistoryManager.getTimestampsByVersion(
       deltaLog.store,
       deltaLog.logPath,
@@ -211,10 +222,12 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
       end + 1,
       conf
     )
+    val timestampIndexNs = System.nanoTime() - tTs
 
+    val tBuild = System.nanoTime()
     val cdcSpecs = ListBuffer[CDCDataSpec]()
 
-    changes.foreach {versionLog =>
+    changesVector.foreach { versionLog =>
         val v = versionLog.getVersion
         val actions = versionLog.getActions.asScala.map(x => ConversionUtils.convertActionJ(x))
         // Check whether CDC was newly disabled in this version. (We should have already checked
@@ -283,7 +296,12 @@ class DeltaSharingCDCReader(val deltaLog: DeltaLogImpl, val conf: Configuration)
         cdcSpecs.append(CDCDataSpec(v, ts, selectedActions.toSeq))
     }
 
-    cdcSpecs.toSeq
+    val cdcSpecBuildNs = System.nanoTime() - tBuild
+    CdcQueryReplayOutcome(
+      cdcSpecs.toSeq,
+      getChangesMaterializeNs,
+      timestampIndexNs,
+      cdcSpecBuildNs)
   }
 
   case class CDCDataSpec(version: Long, timestamp: Timestamp, actions: Seq[Action])
