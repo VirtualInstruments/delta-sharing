@@ -21,3 +21,9 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
+    egressMetrics:
+      enabled: true
+      gcpProjectId: "zcloud-prod"
+      cdfAggregationWindowSeconds: 60
+      batchSize: 20
+      flushIntervalSeconds: 15

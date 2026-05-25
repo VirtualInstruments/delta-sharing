@@ -26,3 +26,9 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
+    egressMetrics:
+      enabled: true
+      gcpProjectId: "GCP_PROJECT_ID_PLACEHOLDER"
+      cdfAggregationWindowSeconds: 60
+      batchSize: 20
+      flushIntervalSeconds: 15
