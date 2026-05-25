@@ -65,3 +65,16 @@ queryTablePageSizeLimit: 10000
 queryTablePageTokenTtlMs: 259200000
 # The TTL of the refresh token generated in queryTable API (in milliseconds).
 refreshTokenTtlMs: 3600000
+# Whether to emit performance/timing log lines for table queries and CDF requests.
+perfLoggingEnabled: true
+# Optional share-attributed egress metrics emitted to Cloud Monitoring.
+egressMetrics:
+  enabled: false
+  # Required when enabled=true.
+  gcpProjectId: "<gcp-project-id>"
+  # CDF egress bytes are aggregated into this window before emission.
+  cdfAggregationWindowSeconds: 60
+  # Max number of time series rows queued before flushing.
+  batchSize: 20
+  # Flush cadence for queued time series writes.
+  flushIntervalSeconds: 15

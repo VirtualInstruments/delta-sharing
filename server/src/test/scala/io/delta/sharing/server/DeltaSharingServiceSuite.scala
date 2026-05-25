@@ -232,6 +232,44 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     }.getMessage.contains("endingVersion is not a valid number")
   }
 
+  test("extractEgressBytes") {
+    val actions: Seq[Object] = Seq(
+      AddFile(
+        url = "u1",
+        id = "1",
+        partitionValues = Map.empty,
+        size = 10L
+      ).wrap,
+      AddFileForCDF(
+        url = "u2",
+        id = "2",
+        partitionValues = Map.empty,
+        size = 15L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      AddCDCFile(
+        url = "u3",
+        id = "3",
+        partitionValues = Map.empty,
+        size = 20L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      RemoveFile(
+        url = "u4",
+        id = "4",
+        partitionValues = Map.empty,
+        size = 25L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      QueryStatus(queryId = "q1").wrap
+    )
+
+    assert(DeltaSharingService.extractEgressBytes(actions) == 45L)
+  }
+
   integrationTest("401 Unauthorized Error: incorrect token") {
     val url = requestPath("/shares")
     val connection = new URL(url).openConnection().asInstanceOf[HttpsURLConnection]

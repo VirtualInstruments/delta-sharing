@@ -33,6 +33,7 @@ import com.linecorp.armeria.server.{Server, ServiceRequestContext}
 import com.linecorp.armeria.server.annotation.{ConsumesJson, Default, ExceptionHandler, ExceptionHandlerFunction, Get, Head, Param, Post, ProducesJson}
 import com.linecorp.armeria.server.auth.AuthService
 import io.delta.kernel.exceptions.{KernelException, TableNotFoundException}
+import io.delta.standalone.internal.{DeltaResponseSingleAction => StandaloneDeltaResponseSingleAction}
 import io.delta.standalone.internal.DeltaCDFErrors
 import io.delta.standalone.internal.DeltaCDFIllegalArgumentException
 import io.delta.standalone.internal.DeltaDataSource
@@ -44,8 +45,9 @@ import scalapb.json4s.Printer
 
 import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.config.ServerConfig
-import io.delta.sharing.server.model.{QueryStatus, SingleAction}
+import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
+import io.delta.sharing.server.telemetry.{EgressMetricPoint, EgressMetricsEmitter}
 
 object ErrorCode {
   val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
@@ -189,6 +191,63 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val deltaSharedTableLoader = new DeltaSharedTableLoader(serverConfig)
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
+  private val egressMetricsEmitter = EgressMetricsEmitter.create(serverConfig)
+  private val cdfAggregationWindowMs = Option(serverConfig.getEgressMetrics)
+    .map(_.cdfAggregationWindowSeconds.toLong * 1000L)
+    .getOrElse(60000L)
+  private val cdfAggregates = scala.collection.mutable.HashMap.empty[(String, Long), Long]
+
+  private def emitQueryEgressMetric(share: String, actions: Seq[Object]): Unit = {
+    val bytes = DeltaSharingService.extractEgressBytes(actions)
+    if (bytes <= 0) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+    val point = EgressMetricPoint(
+      share = share,
+      requestType = EgressMetricsEmitter.QueryRequestType,
+      egressBytes = bytes,
+      startTimeMs = nowMs,
+      endTimeMs = nowMs
+    )
+    egressMetricsEmitter.record(point)
+  }
+
+  private def emitCdfEgressMetric(share: String, actions: Seq[Object]): Unit = {
+    val bytes = DeltaSharingService.extractEgressBytes(actions)
+    if (bytes <= 0) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+    val windowStart = (nowMs / cdfAggregationWindowMs) * cdfAggregationWindowMs
+
+    cdfAggregates.synchronized {
+      flushExpiredCdfAggregates(nowMs)
+      val key = (share, windowStart)
+      val current = cdfAggregates.getOrElse(key, 0L)
+      cdfAggregates.update(key, current + bytes)
+    }
+  }
+
+  private def flushExpiredCdfAggregates(nowMs: Long): Unit = {
+    val expiredKeys = cdfAggregates.keys.filter { case (_, startMs) =>
+      startMs + cdfAggregationWindowMs <= nowMs
+    }.toSeq
+    expiredKeys.foreach { key =>
+      val (share, startMs) = key
+      val bytes = cdfAggregates.remove(key).get
+      val point = EgressMetricPoint(
+        share = share,
+        requestType = EgressMetricsEmitter.CdfStreamRequestType,
+        egressBytes = bytes,
+        startTimeMs = startMs,
+        endTimeMs = startMs + cdfAggregationWindowMs
+      )
+      egressMetricsEmitter.record(point)
+    }
+  }
 
   private def logCdfRequestComplete(
       wallStartNs: Long,
@@ -475,6 +534,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
+      emitQueryEgressMetric(share, queryResult.actions)
+
       streamingOutput(Some(queryResult.version), queryResult.responseFormat, queryResult.actions)
     }
   }
@@ -625,6 +686,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           s"You can only query table data since version ${tableConfig.startVersion}."
         )
       }
+
+      emitQueryEgressMetric(share, queryResult.actions)
       logTableQueryComplete(start, share, schema, table, queryResult)
       streamingOutput(
         Some(queryResult.version),
@@ -683,6 +746,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       deltaLogUpdateNs = updateNs,
       requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
+    emitCdfEgressMetric(share, queryResult.actions)
     logCdfRequestComplete(start, share, schema, table, queryResult)
     streamingOutput(
       Some(queryResult.version),
@@ -738,6 +802,37 @@ object DeltaSharingService {
   val DELTA_SHARING_INCLUDE_END_STREAM_ACTION = "includeendstreamaction"
   val DELTA_SHARING_READER_FEATURES = "readerfeatures"
   val DELTA_SHARING_CAPABILITIES_DELIMITER = ";"
+
+  private[server] def extractEgressBytes(actions: Seq[Object]): Long = {
+    actions.map(extractActionBytes).sum
+  }
+
+  private def extractActionBytes(action: Object): Long = {
+    action match {
+      case singleAction: SingleAction =>
+        val raw = singleAction.unwrap
+        raw match {
+          case addFile: AddFile => addFile.size
+          case addFileForCDF: AddFileForCDF => addFileForCDF.size
+          case addCDCFile: AddCDCFile => addCDCFile.size
+          case _ => 0L
+        }
+      case deltaResponse: StandaloneDeltaResponseSingleAction =>
+        Option(deltaResponse.file)
+          .flatMap(f => Option(f.deltaSingleAction))
+          .map { deltaAction =>
+            if (deltaAction.add != null) {
+              deltaAction.add.size
+            } else if (deltaAction.cdc != null) {
+              deltaAction.cdc.size
+            } else {
+              0L
+            }
+          }
+          .getOrElse(0L)
+      case _ => 0L
+    }
+  }
 
   private val parser = {
     val parser = ArgumentParsers

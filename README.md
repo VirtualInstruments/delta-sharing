@@ -436,6 +436,42 @@ Download the pre-built package `delta-sharing-server-x.y.z.zip` from [GitHub Rel
 - Make changes to your yaml file. You may also need to update some server configs for special requirements.
 - To add Shared Data, add reference to Delta Lake tables you would like to share from this server in this config file.
 
+### Optional Share Egress Metrics (Cloud Monitoring)
+
+The server can emit share-attributed custom metrics to Google Cloud Monitoring:
+
+- `custom.googleapis.com/delta_sharing/share_egress_bytes` (cumulative bytes)
+
+Labels emitted on this metric:
+
+- `share`
+- `request_type` (`query` or `cdf_stream`)
+
+To enable this feature:
+
+1. Configure the `egressMetrics` block in the server yaml.
+2. Ensure the runtime identity has `roles/monitoring.metricWriter` and can use
+   Application Default Credentials (for example `GOOGLE_APPLICATION_CREDENTIALS`).
+
+Example yaml:
+
+```yaml
+shares:
+- name: "share1"
+  schemas:
+  - name: "schema1"
+    tables:
+    - name: "table1"
+      location: "gs://my-bucket/my-table"
+
+egressMetrics:
+  enabled: true
+  gcpProjectId: "my-project"
+  cdfAggregationWindowSeconds: 60
+  batchSize: 20
+  flushIntervalSeconds: 15
+```
+
 ## Config the server to access tables on cloud storage
 
 We support sharing Delta Lake tables on S3, Azure Blob Storage and Azure Data Lake Storage Gen2.

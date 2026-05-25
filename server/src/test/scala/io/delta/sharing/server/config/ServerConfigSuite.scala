@@ -98,10 +98,57 @@ class ServerConfigSuite extends FunSuite {
       serverConfig.setVersion(1)
       serverConfig.setShares(sharesInTemplate)
       serverConfig.setPort(8080)
+      val egressMetrics = new EgressMetricsConfig()
+      egressMetrics.setEnabled(false)
+      egressMetrics.setGcpProjectId("<gcp-project-id>")
+      egressMetrics.setCdfAggregationWindowSeconds(60)
+      egressMetrics.setBatchSize(20)
+      egressMetrics.setFlushIntervalSeconds(15)
+      serverConfig.setEgressMetrics(egressMetrics)
       assert(loaded == serverConfig)
     } finally {
       tempFile.delete()
     }
+  }
+
+  test("egress metrics config") {
+    val serverConfig = new ServerConfig()
+    serverConfig.setVersion(1)
+    serverConfig.setShares(Arrays.asList(
+      ShareConfig("share1", Arrays.asList(
+        SchemaConfig("schema1", Arrays.asList(
+          TableConfig(
+            name = "table1",
+            location = "s3a://bucket/path",
+            id = null
+          )
+        ))
+      ))
+    ))
+    val egressMetrics = new EgressMetricsConfig()
+    egressMetrics.setEnabled(true)
+    egressMetrics.setGcpProjectId("project-1")
+    egressMetrics.setCdfAggregationWindowSeconds(60)
+    egressMetrics.setBatchSize(10)
+    egressMetrics.setFlushIntervalSeconds(5)
+    serverConfig.setEgressMetrics(egressMetrics)
+    testConfig(
+      """version: 1
+        |shares:
+        |- name: share1
+        |  schemas:
+        |  - name: schema1
+        |    tables:
+        |    - name: table1
+        |      location: s3a://bucket/path
+        |egressMetrics:
+        |  enabled: true
+        |  gcpProjectId: project-1
+        |  cdfAggregationWindowSeconds: 60
+        |  batchSize: 10
+        |  flushIntervalSeconds: 5
+        |""".stripMargin,
+      serverConfig)
   }
 
   test("accept unknown fields") {
@@ -155,6 +202,14 @@ class ServerConfigSuite extends FunSuite {
   test("Authorization") {
     assertInvalidConfig("'bearerToken' in 'authorization' must be provided") {
       new Authorization().checkConfig()
+    }
+  }
+
+  test("EgressMetricsConfig") {
+    assertInvalidConfig("'gcpProjectId' in 'egressMetrics' must be provided") {
+      val e = new EgressMetricsConfig()
+      e.setEnabled(true)
+      e.checkConfig()
     }
   }
 

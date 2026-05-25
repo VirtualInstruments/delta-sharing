@@ -67,7 +67,9 @@ case class ServerConfig(
     // The TTL of the refresh token generated in queryTable API (in milliseconds).
     @BeanProperty var refreshTokenTtlMs: Int,
     // Whether to emit performance/timing log lines for table queries and CDF requests.
-    @BeanProperty var perfLoggingEnabled: Boolean
+    @BeanProperty var perfLoggingEnabled: Boolean,
+    // Optional telemetry settings for share-attributed egress metrics.
+    @BeanProperty var egressMetrics: EgressMetricsConfig
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -91,7 +93,8 @@ case class ServerConfig(
       queryTablePageSizeLimit = 10000,
       queryTablePageTokenTtlMs = 259200000, // 3 days
       refreshTokenTtlMs = 3600000, // 1 hour
-      perfLoggingEnabled = true
+      perfLoggingEnabled = true,
+      egressMetrics = null
     )
   }
 
@@ -121,6 +124,44 @@ case class ServerConfig(
     }
     if (ssl != null) {
       ssl.checkConfig()
+    }
+    if (egressMetrics != null) {
+      egressMetrics.checkConfig()
+    }
+  }
+}
+
+case class EgressMetricsConfig(
+    @BeanProperty var enabled: Boolean,
+    @BeanProperty var gcpProjectId: String,
+    @BeanProperty var cdfAggregationWindowSeconds: Int,
+    @BeanProperty var batchSize: Int,
+    @BeanProperty var flushIntervalSeconds: Int) extends ConfigItem {
+
+  def this() = {
+    this(
+      enabled = false,
+      gcpProjectId = null,
+      cdfAggregationWindowSeconds = 60,
+      batchSize = 20,
+      flushIntervalSeconds = 15
+    )
+  }
+
+  override def checkConfig(): Unit = {
+    if (enabled && (gcpProjectId == null || gcpProjectId.trim.isEmpty)) {
+      throw new IllegalArgumentException("'gcpProjectId' in 'egressMetrics' must be provided")
+    }
+    if (cdfAggregationWindowSeconds <= 0) {
+      throw new IllegalArgumentException(
+        "'cdfAggregationWindowSeconds' in 'egressMetrics' must be greater than 0")
+    }
+    if (batchSize <= 0) {
+      throw new IllegalArgumentException("'batchSize' in 'egressMetrics' must be greater than 0")
+    }
+    if (flushIntervalSeconds <= 0) {
+      throw new IllegalArgumentException(
+        "'flushIntervalSeconds' in 'egressMetrics' must be greater than 0")
     }
   }
 }
@@ -238,7 +279,7 @@ case class TableConfig(
     @BeanProperty var location: String,
     @BeanProperty var id: String = "",
     @BeanProperty var historyShared: Boolean = false,
-    @BeanProperty var startVersion: Long = 0) extends ConfigItem {
+  @BeanProperty var startVersion: Long = 0) extends ConfigItem {
 
   def this() {
     this(null, null, null)
