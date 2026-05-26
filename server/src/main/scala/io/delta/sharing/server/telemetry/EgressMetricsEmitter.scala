@@ -16,7 +16,7 @@
 
 package io.delta.sharing.server.telemetry
 
-import java.io.OutputStreamWriter
+import java.io.{BufferedReader, InputStream, InputStreamReader, OutputStreamWriter}
 import java.net.{HttpURLConnection, URL}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Collections
@@ -43,8 +43,10 @@ trait EgressMetricsEmitter {
   def record(point: EgressMetricPoint): Unit
 }
 
+case class MonitoringWriteResult(status: Int, responseBody: Option[String] = None)
+
 trait MonitoringTimeSeriesClient {
-  def write(timeSeries: Seq[Map[String, Any]]): Int
+  def write(timeSeries: Seq[Map[String, Any]]): MonitoringWriteResult
 }
 
 private class HttpMonitoringTimeSeriesClient(config: EgressMetricsConfig)
@@ -55,7 +57,7 @@ private class HttpMonitoringTimeSeriesClient(config: EgressMetricsConfig)
     s"https://monitoring.googleapis.com/v3/projects/${config.gcpProjectId}/timeSeries"
   private var credentials: GoogleCredentials = _
 
-  override def write(timeSeries: Seq[Map[String, Any]]): Int = {
+  override def write(timeSeries: Seq[Map[String, Any]]): MonitoringWriteResult = {
     val body = JsonUtils.toJson(Map("timeSeries" -> timeSeries))
     val connection = new URL(metricWriteUrl).openConnection().asInstanceOf[HttpURLConnection]
     try {
@@ -72,9 +74,38 @@ private class HttpMonitoringTimeSeriesClient(config: EgressMetricsConfig)
       } finally {
         writer.close()
       }
-      connection.getResponseCode
+      val status = connection.getResponseCode
+      MonitoringWriteResult(status, readResponseBody(connection, status))
     } finally {
       connection.disconnect()
+    }
+  }
+
+  private def readResponseBody(connection: HttpURLConnection, status: Int): Option[String] = {
+    val stream: InputStream =
+      if (status / 100 == 2) {
+        null
+      } else {
+        val err = connection.getErrorStream
+        if (err != null) err else connection.getInputStream
+      }
+    if (stream == null) {
+      None
+    } else {
+      val reader = new BufferedReader(new InputStreamReader(stream, UTF_8))
+      try {
+        val sb = new StringBuilder
+        var line = reader.readLine()
+        while (line != null) {
+          if (sb.nonEmpty) sb.append('\n')
+          sb.append(line)
+          line = reader.readLine()
+        }
+        val body = sb.toString().trim
+        if (body.isEmpty) None else Some(body)
+      } finally {
+        reader.close()
+      }
     }
   }
 
@@ -111,12 +142,13 @@ object NoopEgressMetricsEmitter extends EgressMetricsEmitter {
   override def record(point: EgressMetricPoint): Unit = {}
 }
 
-private case class CumulativeTotals(var bytes: Long, var seriesStartMs: Long)
+private case class CumulativeTotals(var bytes: Long)
 
 private sealed trait SendResult
 private case object SendSuccess extends SendResult
 private case object SendRetryableFailure extends SendResult
-private case class SendNonRetryableFailure(status: Int) extends SendResult
+private case class SendNonRetryableFailure(status: Int, responseBody: Option[String])
+  extends SendResult
 
 class GcpCloudMonitoringEgressMetricsEmitter(
     config: EgressMetricsConfig,
@@ -177,8 +209,7 @@ class GcpCloudMonitoringEgressMetricsEmitter(
     val share = sanitizeLabel(point.share, UnknownShare)
     val requestType = sanitizeLabel(point.requestType, QueryRequestType)
     val key = s"$share|$requestType"
-    val startMs = if (point.startTimeMs > 0) point.startTimeMs else System.currentTimeMillis()
-    val totals = cumulativeByLabel.getOrElseUpdate(key, CumulativeTotals(0L, startMs))
+    val totals = cumulativeByLabel.getOrElseUpdate(key, CumulativeTotals(0L))
     totals.bytes += point.egressBytes
     val endMs = math.max(point.endTimeMs, System.currentTimeMillis())
 
@@ -186,7 +217,6 @@ class GcpCloudMonitoringEgressMetricsEmitter(
       ShareEgressBytesMetric,
       share,
       requestType,
-      totals.seriesStartMs,
       endMs,
       Map("int64Value" -> totals.bytes.toString))
 
@@ -235,7 +265,6 @@ class GcpCloudMonitoringEgressMetricsEmitter(
       metricType: String,
       share: String,
       requestType: String,
-      startTimeMs: Long,
       endTimeMs: Long,
       value: Map[String, Any]): Map[String, Any] = {
     Map(
@@ -252,7 +281,8 @@ class GcpCloudMonitoringEgressMetricsEmitter(
       ),
       "points" -> Seq(Map(
         "interval" -> Map(
-          "startTime" -> toRfc3339(startTimeMs),
+          // Cloud Monitoring treats this custom metric as gauge, requiring point start==end.
+          "startTime" -> toRfc3339(endTimeMs),
           "endTime" -> toRfc3339(endTimeMs)
         ),
         "value" -> value
@@ -287,12 +317,14 @@ class GcpCloudMonitoringEgressMetricsEmitter(
         synchronized {
           pendingSeries.prependAll(batch)
       }
-      case SendNonRetryableFailure(status) if batch.size > 1 =>
+      case SendNonRetryableFailure(status, responseBody) if batch.size > 1 =>
         val (left, right) = batch.splitAt(batch.size / 2)
         handleBatchWrite(left)
         handleBatchWrite(right)
-      case SendNonRetryableFailure(status) =>
-        logger.warn(s"Dropping non-retryable egress metric point. status=$status")
+      case SendNonRetryableFailure(status, responseBody) =>
+        logger.warn(
+          s"Dropping non-retryable egress metric point. status=$status" +
+            formatResponseBodyForLog(responseBody))
     }
   }
 
@@ -300,13 +332,18 @@ class GcpCloudMonitoringEgressMetricsEmitter(
     var attempt = 1
     while (attempt <= maxRetryAttempts) {
       try {
-        val status = client.write(batch)
+        val writeResult = client.write(batch)
+        val status = writeResult.status
         if (status / 100 == 2) {
           return SendSuccess
         }
         if (!isRetryableStatus(status)) {
-          return SendNonRetryableFailure(status)
+          return SendNonRetryableFailure(status, writeResult.responseBody)
         }
+        logger.warn(
+          s"Retryable egress metrics write failure status=$status " +
+            s"(attempt=$attempt/$maxRetryAttempts)" +
+            formatResponseBodyForLog(writeResult.responseBody))
         if (attempt < maxRetryAttempts) {
           backoffSleep(attempt)
         }
@@ -332,6 +369,19 @@ class GcpCloudMonitoringEgressMetricsEmitter(
     val jitter = random.nextInt(100)
     val delay = retryBaseDelayMs * (1L << (attempt - 1)) + jitter
     Thread.sleep(delay)
+  }
+
+  private def formatResponseBodyForLog(responseBody: Option[String]): String = {
+    responseBody match {
+      case Some(body) if body.nonEmpty =>
+        val maxLen = 2000
+        val normalized = body.replaceAll("\\s+", " ").trim
+        val truncated = if (normalized.length <= maxLen) normalized else {
+          normalized.substring(0, maxLen) + "..."
+        }
+        s" responseBody=$truncated"
+      case _ => ""
+    }
   }
 }
 

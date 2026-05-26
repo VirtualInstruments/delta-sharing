@@ -27,14 +27,14 @@ class EgressMetricsEmitterSuite extends FunSuite {
   private class FakeClient(sleepMs: Long = 0L) extends MonitoringTimeSeriesClient {
     val writes = scala.collection.mutable.ArrayBuffer.empty[Seq[Map[String, Any]]]
 
-    override def write(timeSeries: Seq[Map[String, Any]]): Int = {
+    override def write(timeSeries: Seq[Map[String, Any]]): MonitoringWriteResult = {
       if (sleepMs > 0) {
         Thread.sleep(sleepMs)
       }
       writes.synchronized {
         writes += timeSeries
       }
-      200
+      MonitoringWriteResult(200)
     }
 
     def writeCount: Int = writes.synchronized {
@@ -74,19 +74,22 @@ class EgressMetricsEmitterSuite extends FunSuite {
       retryBaseDelayMs = 10L)
   }
 
-  private def extractStartTimes(client: FakeClient): Seq[String] = {
+  private def extractIntervals(client: FakeClient): Seq[(String, String)] = {
     client.writes.synchronized {
       client.writes.flatMap { batch =>
         batch.map { timeSeries =>
           val points = timeSeries("points").asInstanceOf[Seq[Map[String, Any]]]
           val interval = points.head("interval").asInstanceOf[Map[String, Any]]
-          interval("startTime").asInstanceOf[String]
+          (
+            interval("startTime").asInstanceOf[String],
+            interval("endTime").asInstanceOf[String]
+          )
         }
       }.toSeq
     }
   }
 
-  test("cumulative metric keeps stable start time for a series") {
+  test("gauge metric points use equal start and end times") {
     val scheduler = Executors.newSingleThreadScheduledExecutor()
     try {
       val client = new FakeClient()
@@ -96,9 +99,9 @@ class EgressMetricsEmitterSuite extends FunSuite {
       emitter.record(EgressMetricPoint("share-a", "query", 20L, 7000L, 8000L))
 
       waitUntil(client.writeCount >= 2, timeoutMs = 3000)
-      val starts = extractStartTimes(client)
-      assert(starts.nonEmpty)
-      assert(starts.forall(_ == starts.head))
+      val intervals = extractIntervals(client)
+      assert(intervals.nonEmpty)
+      assert(intervals.forall { case (start, end) => start == end })
     } finally {
       scheduler.shutdownNow()
     }
