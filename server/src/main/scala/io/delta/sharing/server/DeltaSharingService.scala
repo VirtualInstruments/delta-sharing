@@ -47,7 +47,7 @@ import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.config.ServerConfig
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
-import io.delta.sharing.server.telemetry.{EgressMetricPoint, EgressMetricsEmitter}
+import io.delta.sharing.server.telemetry.{AccessLogEmitter, AccessLogEntry, EgressMetricPoint, EgressMetricsEmitter}
 
 object ErrorCode {
   val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
@@ -192,18 +192,36 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
   private val egressMetricsEmitter = EgressMetricsEmitter.create(serverConfig)
+  private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
   private val cdfAggregationWindowMs = Option(serverConfig.getEgressMetrics)
     .map(_.cdfAggregationWindowSeconds.toLong * 1000L)
     .getOrElse(60000L)
   private val cdfAggregates = scala.collection.mutable.HashMap.empty[(String, Long), Long]
 
-  private def emitQueryEgressMetric(share: String, actions: Seq[Object]): Unit = {
+  private def emitQueryEgressMetric(
+      share: String,
+      schema: String,
+      table: String,
+      actions: Seq[Object]): Unit = {
     val bytes = DeltaSharingService.extractEgressBytes(actions)
     if (bytes <= 0) {
       return
     }
 
     val nowMs = System.currentTimeMillis()
+
+    // Emit to access log (new approach)
+    val entry = AccessLogEntry(
+      share = share,
+      schema = schema,
+      table = table,
+      egressBytes = bytes,
+      requestType = AccessLogEmitter.QueryRequestType,
+      timestampMs = nowMs
+    )
+    accessLogEmitter.record(entry)
+
+    // Also emit to legacy metrics (deprecated, for backward compatibility during transition)
     val point = EgressMetricPoint(
       share = share,
       requestType = EgressMetricsEmitter.QueryRequestType,
@@ -214,13 +232,30 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     egressMetricsEmitter.record(point)
   }
 
-  private def emitCdfEgressMetric(share: String, actions: Seq[Object]): Unit = {
+  private def emitCdfEgressMetric(
+      share: String,
+      schema: String,
+      table: String,
+      actions: Seq[Object]): Unit = {
     val bytes = DeltaSharingService.extractEgressBytes(actions)
     if (bytes <= 0) {
       return
     }
 
     val nowMs = System.currentTimeMillis()
+
+    // Emit to access log immediately (new approach - no aggregation)
+    val entry = AccessLogEntry(
+      share = share,
+      schema = schema,
+      table = table,
+      egressBytes = bytes,
+      requestType = AccessLogEmitter.CdfStreamRequestType,
+      timestampMs = nowMs
+    )
+    accessLogEmitter.record(entry)
+
+    // Also emit to legacy aggregated metrics (deprecated)
     val windowStart = (nowMs / cdfAggregationWindowMs) * cdfAggregationWindowMs
 
     cdfAggregates.synchronized {
@@ -534,7 +569,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
-      emitQueryEgressMetric(share, queryResult.actions)
+      emitQueryEgressMetric(share, schema, table, queryResult.actions)
 
       streamingOutput(Some(queryResult.version), queryResult.responseFormat, queryResult.actions)
     }
@@ -687,7 +722,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
-      emitQueryEgressMetric(share, queryResult.actions)
+      emitQueryEgressMetric(share, schema, table, queryResult.actions)
       logTableQueryComplete(start, share, schema, table, queryResult)
       streamingOutput(
         Some(queryResult.version),
@@ -746,7 +781,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       deltaLogUpdateNs = updateNs,
       requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
-    emitCdfEgressMetric(share, queryResult.actions)
+    emitCdfEgressMetric(share, schema, table, queryResult.actions)
     logCdfRequestComplete(start, share, schema, table, queryResult)
     streamingOutput(
       Some(queryResult.version),

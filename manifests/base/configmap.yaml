@@ -26,6 +26,8 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
+    accessLogging:
+      enabled: true
     egressMetrics:
       enabled: true
       gcpProjectId: "GCP_PROJECT_ID_PLACEHOLDER"

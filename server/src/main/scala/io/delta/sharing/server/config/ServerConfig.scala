@@ -68,8 +68,10 @@ case class ServerConfig(
     @BeanProperty var refreshTokenTtlMs: Int,
     // Whether to emit performance/timing log lines for table queries and CDF requests.
     @BeanProperty var perfLoggingEnabled: Boolean,
-    // Optional telemetry settings for share-attributed egress metrics.
-    @BeanProperty var egressMetrics: EgressMetricsConfig
+    // Telemetry settings for egress metrics (deprecated, use accessLogging).
+    @BeanProperty var egressMetrics: EgressMetricsConfig,
+    // Access logging configuration for tracking share data egress via structured logs.
+    @BeanProperty var accessLogging: AccessLoggingConfig
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -94,7 +96,8 @@ case class ServerConfig(
       queryTablePageTokenTtlMs = 259200000, // 3 days
       refreshTokenTtlMs = 3600000, // 1 hour
       perfLoggingEnabled = true,
-      egressMetrics = null
+      egressMetrics = null,
+      accessLogging = null
     )
   }
 
@@ -127,6 +130,9 @@ case class ServerConfig(
     }
     if (egressMetrics != null) {
       egressMetrics.checkConfig()
+    }
+    if (accessLogging != null) {
+      accessLogging.checkConfig()
     }
   }
 }
@@ -163,6 +169,22 @@ case class EgressMetricsConfig(
       throw new IllegalArgumentException(
         "'flushIntervalSeconds' in 'egressMetrics' must be greater than 0")
     }
+  }
+}
+
+/**
+ * Configuration for access logging to track share data egress.
+ * When enabled, structured JSON logs are emitted for each data access.
+ */
+case class AccessLoggingConfig(
+    @BeanProperty var enabled: Boolean) extends ConfigItem {
+
+  def this() = {
+    this(enabled = false)
+  }
+
+  override def checkConfig(): Unit = {
+    // No additional validation needed - enabled is a simple boolean
   }
 }
 
