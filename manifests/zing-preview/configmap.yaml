@@ -21,9 +21,10 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
-    egressMetrics:
+    accessLogging:
       enabled: true
-      gcpProjectId: "zing-preview"
-      cdfAggregationWindowSeconds: 60
-      batchSize: 20
-      flushIntervalSeconds: 15
+      clientRegionHeader: "x-client-region"
+      clientRegionSubdivisionHeader: "x-client-region-subdivision"
+      clientIpHeader: "x-forwarded-for"
+      pricingGroups: {}
+      defaultPricingGroup: "unknown"

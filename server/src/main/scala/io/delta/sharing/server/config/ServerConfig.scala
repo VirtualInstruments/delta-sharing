@@ -68,8 +68,6 @@ case class ServerConfig(
     @BeanProperty var refreshTokenTtlMs: Int,
     // Whether to emit performance/timing log lines for table queries and CDF requests.
     @BeanProperty var perfLoggingEnabled: Boolean,
-    // Telemetry settings for egress metrics (deprecated, use accessLogging).
-    @BeanProperty var egressMetrics: EgressMetricsConfig,
     // Access logging configuration for tracking share data egress via structured logs.
     @BeanProperty var accessLogging: AccessLoggingConfig
 ) extends ConfigItem {
@@ -96,7 +94,6 @@ case class ServerConfig(
       queryTablePageTokenTtlMs = 259200000, // 3 days
       refreshTokenTtlMs = 3600000, // 1 hour
       perfLoggingEnabled = true,
-      egressMetrics = null,
       accessLogging = null
     )
   }
@@ -128,46 +125,8 @@ case class ServerConfig(
     if (ssl != null) {
       ssl.checkConfig()
     }
-    if (egressMetrics != null) {
-      egressMetrics.checkConfig()
-    }
     if (accessLogging != null) {
       accessLogging.checkConfig()
-    }
-  }
-}
-
-case class EgressMetricsConfig(
-    @BeanProperty var enabled: Boolean,
-    @BeanProperty var gcpProjectId: String,
-    @BeanProperty var cdfAggregationWindowSeconds: Int,
-    @BeanProperty var batchSize: Int,
-    @BeanProperty var flushIntervalSeconds: Int) extends ConfigItem {
-
-  def this() = {
-    this(
-      enabled = false,
-      gcpProjectId = null,
-      cdfAggregationWindowSeconds = 60,
-      batchSize = 20,
-      flushIntervalSeconds = 15
-    )
-  }
-
-  override def checkConfig(): Unit = {
-    if (enabled && (gcpProjectId == null || gcpProjectId.trim.isEmpty)) {
-      throw new IllegalArgumentException("'gcpProjectId' in 'egressMetrics' must be provided")
-    }
-    if (cdfAggregationWindowSeconds <= 0) {
-      throw new IllegalArgumentException(
-        "'cdfAggregationWindowSeconds' in 'egressMetrics' must be greater than 0")
-    }
-    if (batchSize <= 0) {
-      throw new IllegalArgumentException("'batchSize' in 'egressMetrics' must be greater than 0")
-    }
-    if (flushIntervalSeconds <= 0) {
-      throw new IllegalArgumentException(
-        "'flushIntervalSeconds' in 'egressMetrics' must be greater than 0")
     }
   }
 }
@@ -177,14 +136,35 @@ case class EgressMetricsConfig(
  * When enabled, structured JSON logs are emitted for each data access.
  */
 case class AccessLoggingConfig(
-    @BeanProperty var enabled: Boolean) extends ConfigItem {
+    @BeanProperty var enabled: Boolean,
+    // Header that contains the client region code (for example: US, DE).
+    @BeanProperty var clientRegionHeader: String,
+    // Header that contains the client region subdivision (for example: USCA, DEBE).
+    @BeanProperty var clientRegionSubdivisionHeader: String,
+    // Header that contains client IP or forwarding chain (for example: X-Forwarded-For).
+    @BeanProperty var clientIpHeader: String,
+    // Optional mapping from region/subdivision codes to pricing group labels.
+    // Keys should be uppercase location codes (for example: US, DE, USCA).
+    // A wildcard key "*" can be used as a catch-all default.
+    @BeanProperty var pricingGroups: java.util.Map[String, String],
+    // Fallback group when no mapping and no region are available.
+    @BeanProperty var defaultPricingGroup: String) extends ConfigItem {
 
   def this() = {
-    this(enabled = false)
+    this(
+      enabled = false,
+      clientRegionHeader = "x-client-region",
+      clientRegionSubdivisionHeader = "x-client-region-subdivision",
+      clientIpHeader = "x-forwarded-for",
+      pricingGroups = Collections.emptyMap(),
+      defaultPricingGroup = "unknown")
   }
 
   override def checkConfig(): Unit = {
-    // No additional validation needed - enabled is a simple boolean
+    if (defaultPricingGroup == null || defaultPricingGroup.trim.isEmpty) {
+      throw new IllegalArgumentException(
+        "'defaultPricingGroup' in 'accessLogging' must be provided")
+    }
   }
 }
 

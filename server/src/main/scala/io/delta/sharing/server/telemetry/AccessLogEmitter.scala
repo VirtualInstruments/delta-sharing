@@ -30,6 +30,12 @@ import io.delta.sharing.server.config.ServerConfig
  * @param egressBytes The number of bytes transferred
  * @param requestType The type of request: "query" or "cdf_stream"
  * @param timestampMs The timestamp of the access in milliseconds since epoch
+ * @param clientRegion Optional client region code derived from request headers (for example: US)
+ * @param clientRegionSubdivision Optional client subdivision code (for example: USCA)
+ * @param clientIp Optional client IP derived from forwarding headers
+ * @param clientIpSource Optional header name used to resolve client IP
+ * @param clientPricingGroup Pricing group label used for downstream egress cost attribution
+ * @param clientLocationSource Optional header name used to resolve client location
  */
 case class AccessLogEntry(
     share: String,
@@ -37,7 +43,13 @@ case class AccessLogEntry(
     table: String,
     egressBytes: Long,
     requestType: String,
-    timestampMs: Long)
+      timestampMs: Long,
+      clientRegion: Option[String] = None,
+      clientRegionSubdivision: Option[String] = None,
+      clientIp: Option[String] = None,
+      clientIpSource: Option[String] = None,
+      clientPricingGroup: String = "unknown",
+      clientLocationSource: Option[String] = None)
 
 /**
  * Trait for emitting access logs for share data egress tracking.
@@ -84,15 +96,26 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
       return
     }
 
-    val logPayload = Map(
+    val basePayload = Map(
       "logType" -> "ACCESS_LOG",
       "share" -> entry.share,
       "schema" -> entry.schema,
       "table" -> entry.table,
       "egressBytes" -> entry.egressBytes,
       "requestType" -> entry.requestType,
-      "timestampMs" -> entry.timestampMs
+      "timestampMs" -> entry.timestampMs,
+      "clientPricingGroup" -> entry.clientPricingGroup
     )
+
+    val locationPayload = Seq(
+      entry.clientRegion.map("clientRegion" -> _),
+      entry.clientRegionSubdivision.map("clientRegionSubdivision" -> _),
+      entry.clientIp.map("clientIp" -> _),
+      entry.clientIpSource.map("clientIpSource" -> _),
+      entry.clientLocationSource.map("clientLocationSource" -> _)
+    ).flatten.toMap
+
+    val logPayload = basePayload ++ locationPayload
 
     logger.info(JsonUtils.toJson(logPayload))
   }

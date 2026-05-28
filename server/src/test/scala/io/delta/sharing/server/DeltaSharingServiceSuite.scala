@@ -23,6 +23,7 @@ import java.security.cert.X509Certificate
 import java.sql.Timestamp
 import javax.net.ssl._
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import com.linecorp.armeria.server.Server
@@ -34,7 +35,7 @@ import scalapb.json4s.JsonFormat
 import io.delta.sharing.server.DeltaSharingService.DELTA_SHARING_INCLUDE_END_STREAM_ACTION
 import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.common.actions.{ColumnMappingTableFeature, DeletionVectorDescriptor, DeletionVectorsTableFeature, DeltaAddFile, DeltaFormat, DeltaProtocol, DeltaSingleAction}
-import io.delta.sharing.server.config.ServerConfig
+import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model._
 import io.delta.sharing.server.protocol._
 
@@ -268,6 +269,80 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     )
 
     assert(DeltaSharingService.extractEgressBytes(actions) == 45L)
+  }
+
+  test("buildClientLocationContext uses configured geo headers and pricing map") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setPricingGroups(Map("US" -> "na-tier-1", "USCA" -> "us-west").asJava)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "us",
+        "X-Client-Region-Subdivision" -> "us-ca"
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("US"))
+    assert(ctx.clientRegionSubdivision.contains("USCA"))
+    assert(ctx.clientIp.isEmpty)
+    assert(ctx.clientPricingGroup == "us-west")
+    assert(ctx.clientLocationSource.contains("x-client-region"))
+  }
+
+  test("buildClientLocationContext falls back to default headers and wildcard pricing") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setPricingGroups(Map("*" -> "global-tier-2").asJava)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map("CF-IPCountry" -> "br"),
+      cfg)
+
+    assert(ctx.clientRegion.contains("BR"))
+    assert(ctx.clientRegionSubdivision.isEmpty)
+    assert(ctx.clientIp.isEmpty)
+    assert(ctx.clientPricingGroup == "global-tier-2")
+    assert(ctx.clientLocationSource.contains("cf-ipcountry"))
+  }
+
+  test("buildClientLocationContext uses fallback pricing group when location is unavailable") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setDefaultPricingGroup("unknown-tier")
+
+    val ctx = DeltaSharingService.buildClientLocationContext(Map.empty[String, String], cfg)
+
+    assert(ctx.clientRegion.isEmpty)
+    assert(ctx.clientRegionSubdivision.isEmpty)
+    assert(ctx.clientIp.isEmpty)
+    assert(ctx.clientPricingGroup == "unknown-tier")
+    assert(ctx.clientLocationSource.isEmpty)
+  }
+
+  test("buildClientLocationContext extracts client IP from forwarding headers") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map("X-Forwarded-For" -> "10.0.0.1, 217.9.4.27, 35.191.144.206"),
+      cfg)
+
+    assert(ctx.clientRegion.isEmpty)
+    assert(ctx.clientIp.contains("217.9.4.27"))
+    assert(ctx.clientIpSource.contains("x-forwarded-for"))
+  }
+
+  test("buildClientLocationContext applies default pricing groups when no custom map") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map("X-Appengine-Country" -> "de"),
+      cfg)
+
+    assert(ctx.clientRegion.contains("DE"))
+    assert(ctx.clientPricingGroup == "na_eu")
   }
 
   integrationTest("401 Unauthorized Error: incorrect token") {

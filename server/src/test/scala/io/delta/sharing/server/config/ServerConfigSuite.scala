@@ -20,6 +20,7 @@ import java.io.File
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.util.Arrays
+import java.util.Collections
 
 import org.apache.commons.io.FileUtils
 import org.scalatest.FunSuite
@@ -98,20 +99,16 @@ class ServerConfigSuite extends FunSuite {
       serverConfig.setVersion(1)
       serverConfig.setShares(sharesInTemplate)
       serverConfig.setPort(8080)
-      val egressMetrics = new EgressMetricsConfig()
-      egressMetrics.setEnabled(false)
-      egressMetrics.setGcpProjectId("<gcp-project-id>")
-      egressMetrics.setCdfAggregationWindowSeconds(60)
-      egressMetrics.setBatchSize(20)
-      egressMetrics.setFlushIntervalSeconds(15)
-      serverConfig.setEgressMetrics(egressMetrics)
+      val accessLogging = new AccessLoggingConfig()
+      accessLogging.setEnabled(false)
+      serverConfig.setAccessLogging(accessLogging)
       assert(loaded == serverConfig)
     } finally {
       tempFile.delete()
     }
   }
 
-  test("egress metrics config") {
+  test("access logging config") {
     val serverConfig = new ServerConfig()
     serverConfig.setVersion(1)
     serverConfig.setShares(Arrays.asList(
@@ -125,13 +122,14 @@ class ServerConfigSuite extends FunSuite {
         ))
       ))
     ))
-    val egressMetrics = new EgressMetricsConfig()
-    egressMetrics.setEnabled(true)
-    egressMetrics.setGcpProjectId("project-1")
-    egressMetrics.setCdfAggregationWindowSeconds(60)
-    egressMetrics.setBatchSize(10)
-    egressMetrics.setFlushIntervalSeconds(5)
-    serverConfig.setEgressMetrics(egressMetrics)
+    val accessLogging = new AccessLoggingConfig()
+    accessLogging.setEnabled(true)
+    accessLogging.setClientRegionHeader("x-client-region")
+    accessLogging.setClientRegionSubdivisionHeader("x-client-region-subdivision")
+    accessLogging.setClientIpHeader("x-forwarded-for")
+    accessLogging.setPricingGroups(Collections.singletonMap("US", "na-tier-1"))
+    accessLogging.setDefaultPricingGroup("unknown")
+    serverConfig.setAccessLogging(accessLogging)
     testConfig(
       """version: 1
         |shares:
@@ -141,12 +139,14 @@ class ServerConfigSuite extends FunSuite {
         |    tables:
         |    - name: table1
         |      location: s3a://bucket/path
-        |egressMetrics:
+        |accessLogging:
         |  enabled: true
-        |  gcpProjectId: project-1
-        |  cdfAggregationWindowSeconds: 60
-        |  batchSize: 10
-        |  flushIntervalSeconds: 5
+        |  clientRegionHeader: x-client-region
+        |  clientRegionSubdivisionHeader: x-client-region-subdivision
+        |  clientIpHeader: x-forwarded-for
+        |  pricingGroups:
+        |    US: na-tier-1
+        |  defaultPricingGroup: unknown
         |""".stripMargin,
       serverConfig)
   }
@@ -205,11 +205,14 @@ class ServerConfigSuite extends FunSuite {
     }
   }
 
-  test("EgressMetricsConfig") {
-    assertInvalidConfig("'gcpProjectId' in 'egressMetrics' must be provided") {
-      val e = new EgressMetricsConfig()
-      e.setEnabled(true)
-      e.checkConfig()
+  test("AccessLoggingConfig") {
+    val accessLogging = new AccessLoggingConfig()
+    accessLogging.setEnabled(true)
+    accessLogging.checkConfig()
+
+    accessLogging.setDefaultPricingGroup("   ")
+    assertInvalidConfig("'defaultPricingGroup' in 'accessLogging' must be provided") {
+      accessLogging.checkConfig()
     }
   }
 

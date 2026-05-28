@@ -29,7 +29,13 @@ class AccessLogEmitterSuite extends FunSuite {
       table = "test-table",
       egressBytes = 1024L,
       requestType = AccessLogEmitter.QueryRequestType,
-      timestampMs = System.currentTimeMillis()
+      timestampMs = System.currentTimeMillis(),
+      clientRegion = Some("US"),
+      clientRegionSubdivision = Some("USCA"),
+      clientIp = Some("217.9.4.27"),
+      clientIpSource = Some("x-forwarded-for"),
+      clientPricingGroup = "na-tier-1",
+      clientLocationSource = Some("x-client-region")
     )
 
     assert(entry.share == "test-share")
@@ -37,6 +43,12 @@ class AccessLogEmitterSuite extends FunSuite {
     assert(entry.table == "test-table")
     assert(entry.egressBytes == 1024L)
     assert(entry.requestType == "query")
+    assert(entry.clientRegion.contains("US"))
+    assert(entry.clientRegionSubdivision.contains("USCA"))
+    assert(entry.clientIp.contains("217.9.4.27"))
+    assert(entry.clientIpSource.contains("x-forwarded-for"))
+    assert(entry.clientPricingGroup == "na-tier-1")
+    assert(entry.clientLocationSource.contains("x-client-region"))
   }
 
   test("NoopAccessLogEmitter ignores all records") {

@@ -17,9 +17,11 @@
 package io.delta.sharing.server
 
 import java.io.{ByteArrayOutputStream, File, FileNotFoundException}
+import java.net.InetAddress
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.AccessDeniedException
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import javax.annotation.Nullable
 
@@ -44,10 +46,10 @@ import org.slf4j.LoggerFactory
 import scalapb.json4s.Printer
 
 import io.delta.sharing.server.common.JsonUtils
-import io.delta.sharing.server.config.ServerConfig
+import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
-import io.delta.sharing.server.telemetry.{AccessLogEmitter, AccessLogEntry, EgressMetricPoint, EgressMetricsEmitter}
+import io.delta.sharing.server.telemetry.{AccessLogEmitter, AccessLogEntry}
 
 object ErrorCode {
   val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
@@ -191,14 +193,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val deltaSharedTableLoader = new DeltaSharedTableLoader(serverConfig)
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
-  private val egressMetricsEmitter = EgressMetricsEmitter.create(serverConfig)
   private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
-  private val cdfAggregationWindowMs = Option(serverConfig.getEgressMetrics)
-    .map(_.cdfAggregationWindowSeconds.toLong * 1000L)
-    .getOrElse(60000L)
-  private val cdfAggregates = scala.collection.mutable.HashMap.empty[(String, Long), Long]
 
   private def emitQueryEgressMetric(
+      req: HttpRequest,
       share: String,
       schema: String,
       table: String,
@@ -209,6 +207,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     }
 
     val nowMs = System.currentTimeMillis()
+    val location = DeltaSharingService.buildClientLocationContext(
+      req,
+      serverConfig.getAccessLogging)
 
     // Emit to access log (new approach)
     val entry = AccessLogEntry(
@@ -217,22 +218,19 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       table = table,
       egressBytes = bytes,
       requestType = AccessLogEmitter.QueryRequestType,
-      timestampMs = nowMs
+      timestampMs = nowMs,
+      clientRegion = location.clientRegion,
+      clientRegionSubdivision = location.clientRegionSubdivision,
+      clientIp = location.clientIp,
+      clientIpSource = location.clientIpSource,
+      clientPricingGroup = location.clientPricingGroup,
+      clientLocationSource = location.clientLocationSource
     )
     accessLogEmitter.record(entry)
-
-    // Also emit to legacy metrics (deprecated, for backward compatibility during transition)
-    val point = EgressMetricPoint(
-      share = share,
-      requestType = EgressMetricsEmitter.QueryRequestType,
-      egressBytes = bytes,
-      startTimeMs = nowMs,
-      endTimeMs = nowMs
-    )
-    egressMetricsEmitter.record(point)
   }
 
   private def emitCdfEgressMetric(
+      req: HttpRequest,
       share: String,
       schema: String,
       table: String,
@@ -243,6 +241,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     }
 
     val nowMs = System.currentTimeMillis()
+    val location = DeltaSharingService.buildClientLocationContext(
+      req,
+      serverConfig.getAccessLogging)
 
     // Emit to access log immediately (new approach - no aggregation)
     val entry = AccessLogEntry(
@@ -251,37 +252,15 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       table = table,
       egressBytes = bytes,
       requestType = AccessLogEmitter.CdfStreamRequestType,
-      timestampMs = nowMs
+      timestampMs = nowMs,
+      clientRegion = location.clientRegion,
+      clientRegionSubdivision = location.clientRegionSubdivision,
+      clientIp = location.clientIp,
+      clientIpSource = location.clientIpSource,
+      clientPricingGroup = location.clientPricingGroup,
+      clientLocationSource = location.clientLocationSource
     )
     accessLogEmitter.record(entry)
-
-    // Also emit to legacy aggregated metrics (deprecated)
-    val windowStart = (nowMs / cdfAggregationWindowMs) * cdfAggregationWindowMs
-
-    cdfAggregates.synchronized {
-      flushExpiredCdfAggregates(nowMs)
-      val key = (share, windowStart)
-      val current = cdfAggregates.getOrElse(key, 0L)
-      cdfAggregates.update(key, current + bytes)
-    }
-  }
-
-  private def flushExpiredCdfAggregates(nowMs: Long): Unit = {
-    val expiredKeys = cdfAggregates.keys.filter { case (_, startMs) =>
-      startMs + cdfAggregationWindowMs <= nowMs
-    }.toSeq
-    expiredKeys.foreach { key =>
-      val (share, startMs) = key
-      val bytes = cdfAggregates.remove(key).get
-      val point = EgressMetricPoint(
-        share = share,
-        requestType = EgressMetricsEmitter.CdfStreamRequestType,
-        egressBytes = bytes,
-        startTimeMs = startMs,
-        endTimeMs = startMs + cdfAggregationWindowMs
-      )
-      egressMetricsEmitter.record(point)
-    }
   }
 
   private def logCdfRequestComplete(
@@ -569,7 +548,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
-      emitQueryEgressMetric(share, schema, table, queryResult.actions)
+      emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
 
       streamingOutput(Some(queryResult.version), queryResult.responseFormat, queryResult.actions)
     }
@@ -722,7 +701,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
-      emitQueryEgressMetric(share, schema, table, queryResult.actions)
+      emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
       logTableQueryComplete(start, share, schema, table, queryResult)
       streamingOutput(
         Some(queryResult.version),
@@ -781,7 +760,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       deltaLogUpdateNs = updateNs,
       requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
-    emitCdfEgressMetric(share, schema, table, queryResult.actions)
+    emitCdfEgressMetric(req, share, schema, table, queryResult.actions)
     logCdfRequestComplete(start, share, schema, table, queryResult)
     streamingOutput(
       Some(queryResult.version),
@@ -837,9 +816,210 @@ object DeltaSharingService {
   val DELTA_SHARING_INCLUDE_END_STREAM_ACTION = "includeendstreamaction"
   val DELTA_SHARING_READER_FEATURES = "readerfeatures"
   val DELTA_SHARING_CAPABILITIES_DELIMITER = ";"
+  private val DefaultRegionHeaders = Seq(
+    "x-client-region",
+    "x-appengine-country",
+    "cf-ipcountry",
+    "cloudfront-viewer-country")
+  private val DefaultSubdivisionHeaders = Seq(
+    "x-client-region-subdivision",
+    "x-appengine-region")
+  private val DefaultIpHeaders = Seq(
+    "x-forwarded-for",
+    "x-envoy-external-address",
+    "x-real-ip",
+    "true-client-ip")
+  private val DefaultPricingGroupsByRegion = Map(
+    "US" -> "na_eu",
+    "CA" -> "na_eu",
+    "MX" -> "na_eu",
+    "GB" -> "na_eu",
+    "IE" -> "na_eu",
+    "DE" -> "na_eu",
+    "FR" -> "na_eu",
+    "NL" -> "na_eu",
+    "BE" -> "na_eu",
+    "CH" -> "na_eu",
+    "AT" -> "na_eu",
+    "ES" -> "na_eu",
+    "PT" -> "na_eu",
+    "IT" -> "na_eu",
+    "SE" -> "na_eu",
+    "NO" -> "na_eu",
+    "DK" -> "na_eu",
+    "FI" -> "na_eu",
+    "PL" -> "na_eu",
+    "CZ" -> "na_eu",
+    "HU" -> "na_eu",
+    "RO" -> "na_eu",
+    "JP" -> "apac",
+    "KR" -> "apac",
+    "IN" -> "apac",
+    "SG" -> "apac",
+    "HK" -> "apac",
+    "TW" -> "apac",
+    "ID" -> "apac",
+    "MY" -> "apac",
+    "PH" -> "apac",
+    "TH" -> "apac",
+    "VN" -> "apac",
+    "AU" -> "apac",
+    "NZ" -> "apac",
+    "BR" -> "latam",
+    "AR" -> "latam",
+    "CL" -> "latam",
+    "CO" -> "latam",
+    "PE" -> "latam")
+
+  private[server] case class ClientLocationContext(
+      clientRegion: Option[String],
+      clientRegionSubdivision: Option[String],
+      clientIp: Option[String],
+      clientIpSource: Option[String],
+      clientPricingGroup: String,
+      clientLocationSource: Option[String])
 
   private[server] def extractEgressBytes(actions: Seq[Object]): Long = {
     actions.map(extractActionBytes).sum
+  }
+
+  private[server] def buildClientLocationContext(
+      req: HttpRequest,
+      accessLoggingConfig: AccessLoggingConfig): ClientLocationContext = {
+    val headerMap: Map[String, String] = req.headers().names().asScala
+      .flatMap { name =>
+        Option(req.headers().get(name)).map { value =>
+          name.toString.toLowerCase(Locale.ROOT) -> value
+        }
+      }
+      .toMap
+    buildClientLocationContext(headerMap, accessLoggingConfig)
+  }
+
+  private[server] def buildClientLocationContext(
+      requestHeaders: Map[String, String],
+      accessLoggingConfig: AccessLoggingConfig): ClientLocationContext = {
+    val cfgOpt = Option(accessLoggingConfig)
+    val normalizedHeaders = requestHeaders.map { case (k, v) =>
+      k.toLowerCase(Locale.ROOT) -> v
+    }
+
+    val regionHeaders = getOrderedHeaders(
+      cfgOpt.flatMap(c => Option(c.getClientRegionHeader)),
+      DefaultRegionHeaders)
+    val subdivisionHeaders = getOrderedHeaders(
+      cfgOpt.flatMap(c => Option(c.getClientRegionSubdivisionHeader)),
+      DefaultSubdivisionHeaders)
+    val ipHeaders = getOrderedHeaders(
+      cfgOpt.flatMap(c => Option(c.getClientIpHeader)),
+      DefaultIpHeaders)
+
+    val regionWithSource = getFirstLocation(regionHeaders, normalizedHeaders)
+    val subdivisionWithSource = getFirstLocation(subdivisionHeaders, normalizedHeaders)
+    val ipWithSource = getFirstClientIp(ipHeaders, normalizedHeaders)
+
+    val region = regionWithSource.map(_._1)
+    val subdivision = subdivisionWithSource.map(_._1)
+    val clientIp = ipWithSource.map(_._1)
+    val clientIpSource = ipWithSource.map(_._2)
+    val source = regionWithSource.map(_._2).orElse(subdivisionWithSource.map(_._2))
+
+    val configuredPricingMap = cfgOpt
+      .flatMap(c => Option(c.getPricingGroups))
+      .map(_.asScala.toMap)
+      .getOrElse(Map.empty[String, String])
+      .map { case (k, v) => normalizeLocationCode(k) -> v.trim }
+      .filter { case (k, v) => k.nonEmpty && v.nonEmpty }
+
+    val pricingMap = if (configuredPricingMap.nonEmpty) {
+      configuredPricingMap
+    } else {
+      DefaultPricingGroupsByRegion
+    }
+
+    val defaultPricingGroup = cfgOpt
+      .flatMap(c => Option(c.getDefaultPricingGroup))
+      .map(_.trim)
+      .filter(_.nonEmpty)
+      .getOrElse("unknown")
+
+    val pricingGroup = subdivision.flatMap(pricingMap.get)
+      .orElse(region.flatMap(pricingMap.get))
+      .orElse(pricingMap.get("*"))
+      .orElse(region)
+      .getOrElse(defaultPricingGroup)
+
+    ClientLocationContext(
+      clientRegion = region,
+      clientRegionSubdivision = subdivision,
+      clientIp = clientIp,
+      clientIpSource = clientIpSource,
+      clientPricingGroup = pricingGroup,
+      clientLocationSource = source)
+  }
+
+  private def getOrderedHeaders(
+      configuredHeader: Option[String],
+      defaultHeaders: Seq[String]): Seq[String] = {
+    (configuredHeader.toSeq ++ defaultHeaders)
+      .map(_.trim.toLowerCase(Locale.ROOT))
+      .filter(_.nonEmpty)
+      .distinct
+  }
+
+  private def getFirstLocation(
+      headers: Seq[String],
+      requestHeaders: Map[String, String]): Option[(String, String)] = {
+    headers.iterator
+      .flatMap { h =>
+        requestHeaders.get(h)
+          .map(v => normalizeLocationCode(v) -> h)
+      }
+      .find(_._1.nonEmpty)
+  }
+
+  private def getFirstClientIp(
+      headers: Seq[String],
+      requestHeaders: Map[String, String]): Option[(String, String)] = {
+    headers.iterator
+      .flatMap { h =>
+        requestHeaders.get(h)
+          .flatMap(v => extractClientIp(v).map(_ -> h))
+      }
+      .toSeq
+      .headOption
+  }
+
+  private def extractClientIp(value: String): Option[String] = {
+    val candidates = value.split(",").map(_.trim).filter(_.nonEmpty)
+    val valid = candidates.filter(isValidIp)
+    valid.find(isPublicIp).orElse(valid.headOption)
+  }
+
+  private def isValidIp(ip: String): Boolean = {
+    try {
+      InetAddress.getByName(ip)
+      true
+    } catch {
+      case _: Throwable => false
+    }
+  }
+
+  private def isPublicIp(ip: String): Boolean = {
+    try {
+      val inet = InetAddress.getByName(ip)
+      !inet.isAnyLocalAddress &&
+      !inet.isLoopbackAddress &&
+      !inet.isLinkLocalAddress &&
+      !inet.isSiteLocalAddress &&
+      !inet.isMulticastAddress
+    } catch {
+      case _: Throwable => false
+    }
+  }
+
+  private def normalizeLocationCode(value: String): String = {
+    value.trim.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9*]", "")
   }
 
   private def extractActionBytes(action: Object): Long = {
