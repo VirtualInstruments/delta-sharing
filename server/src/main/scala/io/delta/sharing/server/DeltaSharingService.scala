@@ -808,6 +808,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
 
 object DeltaSharingService {
+  // TEMPORARY: Logger for debugging headers - remove after testing X-Client-Region
+  private val logger = LoggerFactory.getLogger("delta.sharing.headers.debug")
+
   val DELTA_TABLE_VERSION_HEADER = "Delta-Table-Version"
   val DELTA_TABLE_METADATA_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
   val DELTA_SHARING_CAPABILITIES_HEADER = "delta-sharing-capabilities"
@@ -893,6 +896,10 @@ object DeltaSharingService {
         }
       }
       .toMap
+
+    // TEMPORARY: Log all request headers for debugging X-Client-Region availability
+    logger.info(s"Request headers: ${JsonUtils.toJson(headerMap)}")
+
     buildClientLocationContext(headerMap, accessLoggingConfig)
   }
 
