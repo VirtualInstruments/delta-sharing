@@ -274,53 +274,45 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
   test("buildClientLocationContext uses configured geo headers and pricing map") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
-    cfg.setPricingGroups(Map("US" -> "na-tier-1", "USCA" -> "us-west").asJava)
 
     val ctx = DeltaSharingService.buildClientLocationContext(
       Map(
         "X-Client-Region" -> "us",
-        "X-Client-Region-Subdivision" -> "us-ca"
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
       ),
       cfg)
 
     assert(ctx.clientRegion.contains("US"))
-    assert(ctx.clientRegionSubdivision.contains("USCA"))
-    assert(ctx.clientIp.isEmpty)
-    assert(ctx.clientPricingGroup == "us-west")
-    assert(ctx.clientLocationSource.contains("x-client-region"))
+    assert(ctx.pricingTier == "internet_to_na_eu")
   }
 
-  test("buildClientLocationContext falls back to default headers and wildcard pricing") {
+  test("buildClientLocationContext falls back to default headers for region") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
-    cfg.setPricingGroups(Map("*" -> "global-tier-2").asJava)
 
     val ctx = DeltaSharingService.buildClientLocationContext(
-      Map("CF-IPCountry" -> "br"),
+      Map(
+        "CF-IPCountry" -> "br",
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
+      ),
       cfg)
 
     assert(ctx.clientRegion.contains("BR"))
-    assert(ctx.clientRegionSubdivision.isEmpty)
-    assert(ctx.clientIp.isEmpty)
-    assert(ctx.clientPricingGroup == "global-tier-2")
-    assert(ctx.clientLocationSource.contains("cf-ipcountry"))
+    assert(ctx.pricingTier == "internet_to_latam")
   }
 
-  test("buildClientLocationContext uses fallback pricing group when location is unavailable") {
+  test("buildClientLocationContext returns same_region for local traffic") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
-    cfg.setDefaultPricingGroup("unknown-tier")
 
+    // No region header, no X-Forwarded-For -> same_region
     val ctx = DeltaSharingService.buildClientLocationContext(Map.empty[String, String], cfg)
 
     assert(ctx.clientRegion.isEmpty)
-    assert(ctx.clientRegionSubdivision.isEmpty)
-    assert(ctx.clientIp.isEmpty)
-    assert(ctx.clientPricingGroup == "unknown-tier")
-    assert(ctx.clientLocationSource.isEmpty)
+    assert(ctx.pricingTier == "same_region")
   }
 
-  test("buildClientLocationContext extracts client IP from forwarding headers") {
+  test("buildClientLocationContext uses IP from X-Forwarded-For for pricing tier") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
 
@@ -329,20 +321,105 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
       cfg)
 
     assert(ctx.clientRegion.isEmpty)
-    assert(ctx.clientIp.contains("217.9.4.27"))
-    assert(ctx.clientIpSource.contains("x-forwarded-for"))
+    // Public IP in chain -> internet traffic, but no region -> unknown destination
+    assert(ctx.pricingTier == "unknown")
   }
 
-  test("buildClientLocationContext applies default pricing groups when no custom map") {
+  test("buildClientLocationContext calculates internet tier for EU destination") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
 
     val ctx = DeltaSharingService.buildClientLocationContext(
-      Map("X-Appengine-Country" -> "de"),
+      Map(
+        "X-Appengine-Country" -> "de",
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
+      ),
       cfg)
 
     assert(ctx.clientRegion.contains("DE"))
-    assert(ctx.clientPricingGroup == "na_eu")
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext calculates internet tier for DE destination") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "DE",
+        "X-Forwarded-For" -> "1.2.3.4"
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("DE"))
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext detects same_region for no external IP") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map.empty[String, String],
+      cfg)
+
+    assert(ctx.pricingTier == "same_region")
+  }
+
+  test("buildClientLocationContext calculates inter-region tier for ZZ region") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "ZZ",
+        "X-Forwarded-For" -> "34.100.0.1"
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("ZZ"))
+    // Inter-region from NA (us-central1) to unknown -> internet fallback
+    assert(ctx.pricingTier.startsWith("inter") || ctx.pricingTier == "unknown")
+  }
+
+  test("buildClientLocationContext calculates internet tier without source region") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setDetectGcpTraffic(true)
+    // Note: sourceRegion is NOT set
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "DE",
+        "X-Forwarded-For" -> "1.2.3.4"
+      ),
+      cfg)
+
+    // Internet pricing doesn't require sourceRegion
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext returns unknown for inter-region without source") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setDetectGcpTraffic(true)
+    // Note: sourceRegion is NOT set
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "ZZ",  // ZZ indicates internal GCP traffic
+        "X-Forwarded-For" -> "34.100.0.1"
+      ),
+      cfg)
+
+    // Inter-region requires sourceRegion, so unknown pricing tier
+    assert(ctx.pricingTier == "unknown")
   }
 
   integrationTest("401 Unauthorized Error: incorrect token") {

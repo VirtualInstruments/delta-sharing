@@ -28,14 +28,10 @@ class AccessLogEmitterSuite extends FunSuite {
       schema = "test-schema",
       table = "test-table",
       egressBytes = 1024L,
-      requestType = AccessLogEmitter.QueryRequestType,
       timestampMs = System.currentTimeMillis(),
+      pricingTier = "internet_to_na_eu",
       clientRegion = Some("US"),
-      clientRegionSubdivision = Some("USCA"),
-      clientIp = Some("217.9.4.27"),
-      clientIpSource = Some("x-forwarded-for"),
-      clientPricingGroup = "na-tier-1",
-      clientLocationSource = Some("x-client-region")
+      requestType = AccessLogEmitter.QueryRequestType
     )
 
     assert(entry.share == "test-share")
@@ -44,11 +40,7 @@ class AccessLogEmitterSuite extends FunSuite {
     assert(entry.egressBytes == 1024L)
     assert(entry.requestType == "query")
     assert(entry.clientRegion.contains("US"))
-    assert(entry.clientRegionSubdivision.contains("USCA"))
-    assert(entry.clientIp.contains("217.9.4.27"))
-    assert(entry.clientIpSource.contains("x-forwarded-for"))
-    assert(entry.clientPricingGroup == "na-tier-1")
-    assert(entry.clientLocationSource.contains("x-client-region"))
+    assert(entry.pricingTier == "internet_to_na_eu")
   }
 
   test("NoopAccessLogEmitter ignores all records") {
@@ -58,7 +50,6 @@ class AccessLogEmitterSuite extends FunSuite {
       schema = "sc",
       table = "t",
       egressBytes = 100L,
-      requestType = AccessLogEmitter.QueryRequestType,
       timestampMs = 0L
     ))
   }
@@ -71,7 +62,6 @@ class AccessLogEmitterSuite extends FunSuite {
       schema = "sc",
       table = "t",
       egressBytes = 0L,
-      requestType = AccessLogEmitter.QueryRequestType,
       timestampMs = 0L
     ))
   }
@@ -84,8 +74,8 @@ class AccessLogEmitterSuite extends FunSuite {
       schema = "analytics",
       table = "events",
       egressBytes = 50000L,
-      requestType = AccessLogEmitter.CdfStreamRequestType,
-      timestampMs = 1716864000000L
+      timestampMs = 1716864000000L,
+      requestType = AccessLogEmitter.CdfStreamRequestType
     ))
   }
 

@@ -86,3 +86,11 @@ accessLogging:
   pricingGroups: {}
   # Fallback pricing group when no location can be resolved.
   defaultPricingGroup: "unknown"
+  # GCP region where this server runs (for example: us-central1).
+  # Required for GCP pricing tier calculation.
+  # Used to determine source→destination pairs for egress cost attribution.
+  sourceRegion: ""
+  # Enable GCP inter-region traffic detection via X-Envoy-Peer-Metadata header.
+  # When true, traffic from other GCP regions is classified as inter-region (cheaper)
+  # rather than internet egress. Set to false to disable detection.
+  detectGcpTraffic: true

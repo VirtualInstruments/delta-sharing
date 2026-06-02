@@ -24,32 +24,52 @@ import io.delta.sharing.server.config.ServerConfig
 /**
  * Represents a single access log entry for share data egress tracking.
  *
+ * == Core Fields (always present) ==
  * @param share The name of the share being accessed
  * @param schema The schema containing the table
  * @param table The table being accessed
- * @param egressBytes The number of bytes transferred
- * @param requestType The type of request: "query" or "cdf_stream"
+ * @param egressBytes The number of bytes transferred (used for cost calculation)
  * @param timestampMs The timestamp of the access in milliseconds since epoch
- * @param clientRegion Optional client region code derived from request headers (for example: US)
- * @param clientRegionSubdivision Optional client subdivision code (for example: USCA)
- * @param clientIp Optional client IP derived from forwarding headers
- * @param clientIpSource Optional header name used to resolve client IP
- * @param clientPricingGroup Pricing group label used for downstream egress cost attribution
- * @param clientLocationSource Optional header name used to resolve client location
+ *
+ * == Pricing Fields ==
+ * @param pricingTier GCP egress pricing tier. See GcpPricingTier for values:
+ *
+ *   '''Internet Egress (Premium Tier):'''
+ *   - `internet_to_na_eu` - To North America or Europe (~$0.12/GiB)
+ *   - `internet_to_apac` - To Asia Pacific (~$0.12/GiB)
+ *   - `internet_to_latam` - To Latin America (~$0.19/GiB)
+ *   - `internet_to_oceania` - To Australia/Oceania (~$0.15/GiB)
+ *
+ *   '''Inter-region GCP Traffic:'''
+ *   - `interregion_na_to_na` - NA to NA (~$0.02/GiB)
+ *   - `interregion_na_to_eu` - NA to EU (~$0.05/GiB)
+ *   - `interregion_eu_to_na` - EU to NA (~$0.05/GiB)
+ *   - `interregion_eu_to_eu` - EU to EU (~$0.02/GiB)
+ *   - `interregion_to_apac` - Any to APAC (~$0.08/GiB)
+ *   - `interregion_to_oceania` - Any to Oceania (~$0.10/GiB)
+ *   - `interregion_to_latam` - Any to LATAM (~$0.14/GiB)
+ *
+ *   '''Free/Low-cost:'''
+ *   - `same_zone` - Within same GCP zone (free)
+ *   - `same_region` - Within same region or K8s cluster (~free)
+ *
+ *   - `unknown` - Could not determine pricing tier
+ *
+ *   Pricing reference: https://cloud.google.com/vpc/network-pricing
+ *
+ * == Optional Context ==
+ * @param clientRegion ISO 3166-1 alpha-2 country code of the client (e.g., "US", "MT")
+ * @param requestType Type of request: "query" (snapshot read) or "cdf_stream" (CDF streaming)
  */
 case class AccessLogEntry(
     share: String,
     schema: String,
     table: String,
     egressBytes: Long,
-    requestType: String,
-      timestampMs: Long,
-      clientRegion: Option[String] = None,
-      clientRegionSubdivision: Option[String] = None,
-      clientIp: Option[String] = None,
-      clientIpSource: Option[String] = None,
-      clientPricingGroup: String = "unknown",
-      clientLocationSource: Option[String] = None)
+    timestampMs: Long,
+    pricingTier: String = "unknown",
+    clientRegion: Option[String] = None,
+    requestType: String = "query")
 
 /**
  * Trait for emitting access logs for share data egress tracking.
@@ -96,26 +116,24 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
       return
     }
 
+    // Core payload with essential fields for cost tracking
     val basePayload = Map(
       "logType" -> "ACCESS_LOG",
       "share" -> entry.share,
       "schema" -> entry.schema,
       "table" -> entry.table,
       "egressBytes" -> entry.egressBytes,
-      "requestType" -> entry.requestType,
+      "pricingTier" -> entry.pricingTier,
       "timestampMs" -> entry.timestampMs,
-      "clientPricingGroup" -> entry.clientPricingGroup
+      "requestType" -> entry.requestType
     )
 
-    val locationPayload = Seq(
-      entry.clientRegion.map("clientRegion" -> _),
-      entry.clientRegionSubdivision.map("clientRegionSubdivision" -> _),
-      entry.clientIp.map("clientIp" -> _),
-      entry.clientIpSource.map("clientIpSource" -> _),
-      entry.clientLocationSource.map("clientLocationSource" -> _)
+    // Optional context fields
+    val contextPayload = Seq(
+      entry.clientRegion.map("clientRegion" -> _)
     ).flatten.toMap
 
-    val logPayload = basePayload ++ locationPayload
+    val logPayload = basePayload ++ contextPayload
 
     logger.info(JsonUtils.toJson(logPayload))
   }

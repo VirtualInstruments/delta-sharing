@@ -148,7 +148,14 @@ case class AccessLoggingConfig(
     // A wildcard key "*" can be used as a catch-all default.
     @BeanProperty var pricingGroups: java.util.Map[String, String],
     // Fallback group when no mapping and no region are available.
-    @BeanProperty var defaultPricingGroup: String) extends ConfigItem {
+    @BeanProperty var defaultPricingGroup: String,
+    // The GCP region where this server runs (for example: us-central1).
+    // Used for pricing tier calculation based on source→destination pairs.
+    @BeanProperty var sourceRegion: String,
+    // Enable GCP inter-region traffic detection via X-Envoy-Peer-Metadata header.
+    // When true, traffic from other GCP regions is classified as inter-region (cheaper)
+    // rather than internet egress.
+    @BeanProperty var detectGcpTraffic: Boolean) extends ConfigItem {
 
   def this() = {
     this(
@@ -157,7 +164,9 @@ case class AccessLoggingConfig(
       clientRegionSubdivisionHeader = "x-client-region-subdivision",
       clientIpHeader = "x-forwarded-for",
       pricingGroups = Collections.emptyMap(),
-      defaultPricingGroup = "unknown")
+      defaultPricingGroup = "unknown",
+      sourceRegion = "",
+      detectGcpTraffic = true)
   }
 
   override def checkConfig(): Unit = {

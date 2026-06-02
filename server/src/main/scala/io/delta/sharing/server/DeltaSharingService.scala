@@ -49,7 +49,7 @@ import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
-import io.delta.sharing.server.telemetry.{AccessLogEmitter, AccessLogEntry}
+import io.delta.sharing.server.telemetry.{AccessLogEmitter, AccessLogEntry, GcpPricingTier}
 
 object ErrorCode {
   val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
@@ -211,20 +211,16 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       req,
       serverConfig.getAccessLogging)
 
-    // Emit to access log (new approach)
+    // Emit to access log
     val entry = AccessLogEntry(
       share = share,
       schema = schema,
       table = table,
       egressBytes = bytes,
-      requestType = AccessLogEmitter.QueryRequestType,
       timestampMs = nowMs,
+      pricingTier = location.pricingTier,
       clientRegion = location.clientRegion,
-      clientRegionSubdivision = location.clientRegionSubdivision,
-      clientIp = location.clientIp,
-      clientIpSource = location.clientIpSource,
-      clientPricingGroup = location.clientPricingGroup,
-      clientLocationSource = location.clientLocationSource
+      requestType = AccessLogEmitter.QueryRequestType
     )
     accessLogEmitter.record(entry)
   }
@@ -245,20 +241,16 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       req,
       serverConfig.getAccessLogging)
 
-    // Emit to access log immediately (new approach - no aggregation)
+    // Emit to access log
     val entry = AccessLogEntry(
       share = share,
       schema = schema,
       table = table,
       egressBytes = bytes,
-      requestType = AccessLogEmitter.CdfStreamRequestType,
       timestampMs = nowMs,
+      pricingTier = location.pricingTier,
       clientRegion = location.clientRegion,
-      clientRegionSubdivision = location.clientRegionSubdivision,
-      clientIp = location.clientIp,
-      clientIpSource = location.clientIpSource,
-      clientPricingGroup = location.clientPricingGroup,
-      clientLocationSource = location.clientLocationSource
+      requestType = AccessLogEmitter.CdfStreamRequestType
     )
     accessLogEmitter.record(entry)
   }
@@ -874,13 +866,14 @@ object DeltaSharingService {
     "CO" -> "latam",
     "PE" -> "latam")
 
+  /**
+   * Simplified location context for egress pricing.
+   * @param clientRegion ISO country code (e.g., "US", "MT") from X-Client-Region header
+   * @param pricingTier GCP egress pricing tier (see GcpPricingTier for values)
+   */
   private[server] case class ClientLocationContext(
       clientRegion: Option[String],
-      clientRegionSubdivision: Option[String],
-      clientIp: Option[String],
-      clientIpSource: Option[String],
-      clientPricingGroup: String,
-      clientLocationSource: Option[String])
+      pricingTier: String)
 
   private[server] def extractEgressBytes(actions: Seq[Object]): Long = {
     actions.map(extractActionBytes).sum
@@ -897,9 +890,6 @@ object DeltaSharingService {
       }
       .toMap
 
-    // TEMPORARY: Log all request headers for debugging X-Client-Region availability
-    logger.info(s"Request headers: ${JsonUtils.toJson(headerMap)}")
-
     buildClientLocationContext(headerMap, accessLoggingConfig)
   }
 
@@ -911,58 +901,59 @@ object DeltaSharingService {
       k.toLowerCase(Locale.ROOT) -> v
     }
 
+    // Extract client region from headers
     val regionHeaders = getOrderedHeaders(
       cfgOpt.flatMap(c => Option(c.getClientRegionHeader)),
       DefaultRegionHeaders)
-    val subdivisionHeaders = getOrderedHeaders(
-      cfgOpt.flatMap(c => Option(c.getClientRegionSubdivisionHeader)),
-      DefaultSubdivisionHeaders)
     val ipHeaders = getOrderedHeaders(
       cfgOpt.flatMap(c => Option(c.getClientIpHeader)),
       DefaultIpHeaders)
 
     val regionWithSource = getFirstLocation(regionHeaders, normalizedHeaders)
-    val subdivisionWithSource = getFirstLocation(subdivisionHeaders, normalizedHeaders)
     val ipWithSource = getFirstClientIp(ipHeaders, normalizedHeaders)
 
     val region = regionWithSource.map(_._1)
-    val subdivision = subdivisionWithSource.map(_._1)
     val clientIp = ipWithSource.map(_._1)
-    val clientIpSource = ipWithSource.map(_._2)
-    val source = regionWithSource.map(_._2).orElse(subdivisionWithSource.map(_._2))
 
-    val configuredPricingMap = cfgOpt
-      .flatMap(c => Option(c.getPricingGroups))
-      .map(_.asScala.toMap)
-      .getOrElse(Map.empty[String, String])
-      .map { case (k, v) => normalizeLocationCode(k) -> v.trim }
-      .filter { case (k, v) => k.nonEmpty && v.nonEmpty }
-
-    val pricingMap = if (configuredPricingMap.nonEmpty) {
-      configuredPricingMap
-    } else {
-      DefaultPricingGroupsByRegion
-    }
-
-    val defaultPricingGroup = cfgOpt
-      .flatMap(c => Option(c.getDefaultPricingGroup))
+    // GCP Pricing Tier calculation
+    val sourceRegion = cfgOpt
+      .flatMap(c => Option(c.getSourceRegion))
       .map(_.trim)
       .filter(_.nonEmpty)
-      .getOrElse("unknown")
 
-    val pricingGroup = subdivision.flatMap(pricingMap.get)
-      .orElse(region.flatMap(pricingMap.get))
-      .orElse(pricingMap.get("*"))
-      .orElse(region)
-      .getOrElse(defaultPricingGroup)
+    val detectGcpTraffic = cfgOpt
+      .map(c => c.getDetectGcpTraffic)
+      .getOrElse(true)
+
+    val envoyPeerMetadata = normalizedHeaders.get("x-envoy-peer-metadata")
+
+    val (egressType, destGcpRegion) = GcpPricingTier.determineEgressType(
+      clientIp,
+      envoyPeerMetadata,
+      region,
+      detectGcpTraffic)
+
+    // Calculate pricing tier:
+    // - For internet traffic: based on destination only (no sourceRegion needed)
+    // - For inter-region traffic: requires sourceRegion
+    // - For same_zone/same_region: tier is the egress type itself
+    val pricingTier = egressType match {
+      case GcpPricingTier.EgressType.INTERNET =>
+        GcpPricingTier.calculatePricingTier(
+          sourceRegion, destGcpRegion, region, egressType)
+      case GcpPricingTier.EgressType.SAME_ZONE |
+           GcpPricingTier.EgressType.SAME_REGION =>
+        egressType.toString
+      case GcpPricingTier.EgressType.INTER_REGION if sourceRegion.isDefined =>
+        GcpPricingTier.calculatePricingTier(
+          sourceRegion, destGcpRegion, region, egressType)
+      case _ =>
+        "unknown"
+    }
 
     ClientLocationContext(
       clientRegion = region,
-      clientRegionSubdivision = subdivision,
-      clientIp = clientIp,
-      clientIpSource = clientIpSource,
-      clientPricingGroup = pricingGroup,
-      clientLocationSource = source)
+      pricingTier = pricingTier)
   }
 
   private def getOrderedHeaders(
