@@ -72,11 +72,55 @@ case class AccessLogEntry(
     requestType: String = "query")
 
 /**
+ * Captures all context information used to calculate the pricing tier.
+ * Emitted alongside ACCESS_LOG for debugging and accuracy verification.
+ *
+ * @param share The share being accessed (for correlation)
+ * @param table The table being accessed (for correlation)
+ * @param timestampMs Timestamp for correlation with ACCESS_LOG
+ *
+ * == Raw Header Values ==
+ * @param clientIp First non-private, non-GCP IP from X-Forwarded-For chain
+ * @param clientIpSource Header that provided the client IP (e.g., "x-forwarded-for")
+ * @param rawRegionHeader Raw value from region header (before normalization)
+ * @param regionHeaderSource Header that provided the region (e.g., "x-client-region")
+ * @param hasEnvoyMetadata Whether X-Envoy-Peer-Metadata header was present
+ * @param isGcpIp Whether the client IP is in a known GCP public IP range (34.x, 35.x)
+ *
+ * == Derived Values ==
+ * @param egressType Detected egress type: internet, inter_region, same_region, same_zone
+ * @param sourceRegion GCP region where server runs (from config)
+ * @param sourceContinent Continent of source region
+ * @param destinationRegion GCP region of destination (if detected from Envoy metadata)
+ * @param destinationContinent Continent of destination
+ * @param pricingTier Final calculated pricing tier
+ */
+case class PricingContextLogEntry(
+    share: String,
+    table: String,
+    timestampMs: Long,
+    // Raw header values
+    clientIp: Option[String] = None,
+    clientIpSource: Option[String] = None,
+    rawRegionHeader: Option[String] = None,
+    regionHeaderSource: Option[String] = None,
+    hasEnvoyMetadata: Boolean = false,
+    isGcpIp: Boolean = false,
+    // Derived values
+    egressType: String = "unknown",
+    sourceRegion: Option[String] = None,
+    sourceContinent: Option[String] = None,
+    destinationRegion: Option[String] = None,
+    destinationContinent: Option[String] = None,
+    pricingTier: String = "unknown")
+
+/**
  * Trait for emitting access logs for share data egress tracking.
  * Implementations can write to different destinations (logging, external services, etc.)
  */
 trait AccessLogEmitter {
   def record(entry: AccessLogEntry): Unit
+  def recordContext(entry: PricingContextLogEntry): Unit
 }
 
 object AccessLogEmitter {
@@ -101,6 +145,7 @@ object AccessLogEmitter {
  */
 object NoopAccessLogEmitter extends AccessLogEmitter {
   override def record(entry: AccessLogEntry): Unit = {}
+  override def recordContext(entry: PricingContextLogEntry): Unit = {}
 }
 
 /**
@@ -134,6 +179,36 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
     ).flatten.toMap
 
     val logPayload = basePayload ++ contextPayload
+
+    logger.info(JsonUtils.toJson(logPayload))
+  }
+
+  override def recordContext(entry: PricingContextLogEntry): Unit = {
+    // Core payload for correlation
+    val basePayload = Map(
+      "logType" -> "PRICING_CONTEXT",
+      "share" -> entry.share,
+      "table" -> entry.table,
+      "timestampMs" -> entry.timestampMs,
+      "egressType" -> entry.egressType,
+      "pricingTier" -> entry.pricingTier,
+      "hasEnvoyMetadata" -> entry.hasEnvoyMetadata,
+      "isGcpIp" -> entry.isGcpIp
+    )
+
+    // Optional context fields - only include if present
+    val optionalPayload = Seq(
+      entry.clientIp.map("clientIp" -> _),
+      entry.clientIpSource.map("clientIpSource" -> _),
+      entry.rawRegionHeader.map("rawRegionHeader" -> _),
+      entry.regionHeaderSource.map("regionHeaderSource" -> _),
+      entry.sourceRegion.map("sourceRegion" -> _),
+      entry.sourceContinent.map("sourceContinent" -> _),
+      entry.destinationRegion.map("destinationRegion" -> _),
+      entry.destinationContinent.map("destinationContinent" -> _)
+    ).flatten.toMap
+
+    val logPayload = basePayload ++ optionalPayload
 
     logger.info(JsonUtils.toJson(logPayload))
   }

@@ -405,7 +405,7 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     assert(ctx.pricingTier == "internet_to_na_eu")
   }
 
-  test("buildClientLocationContext returns unknown for inter-region without source") {
+  test("buildClientLocationContext returns interregion_unknown for GCP IP without source") {
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
     cfg.setDetectGcpTraffic(true)
@@ -414,12 +414,12 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     val ctx = DeltaSharingService.buildClientLocationContext(
       Map(
         "X-Client-Region" -> "ZZ",  // ZZ indicates internal GCP traffic
-        "X-Forwarded-For" -> "34.100.0.1"
+        "X-Forwarded-For" -> "34.100.0.1"  // GCP public IP
       ),
       cfg)
 
-    // Inter-region requires sourceRegion, so unknown pricing tier
-    assert(ctx.pricingTier == "unknown")
+    // Inter-region detected (GCP IP + ZZ region), but no sourceRegion for exact tier
+    assert(ctx.pricingTier == "interregion_unknown")
   }
 
   integrationTest("401 Unauthorized Error: incorrect token") {

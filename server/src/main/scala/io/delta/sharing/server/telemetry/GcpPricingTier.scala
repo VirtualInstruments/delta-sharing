@@ -273,22 +273,51 @@ object GcpPricingTier {
   def isLikelySameClusterTraffic(clientIp: Option[String]): Boolean = {
     clientIp match {
       case None => true // No forwarding header often means same-cluster
-      case Some(ip) =>
-        // Check for common private IP ranges used in Kubernetes
-        ip.startsWith("10.") ||
-        ip.startsWith("172.16.") || ip.startsWith("172.17.") || ip.startsWith("172.18.") ||
-        ip.startsWith("172.19.") || ip.startsWith("172.20.") || ip.startsWith("172.21.") ||
-        ip.startsWith("172.22.") || ip.startsWith("172.23.") || ip.startsWith("172.24.") ||
-        ip.startsWith("172.25.") || ip.startsWith("172.26.") || ip.startsWith("172.27.") ||
-        ip.startsWith("172.28.") || ip.startsWith("172.29.") || ip.startsWith("172.30.") ||
-        ip.startsWith("172.31.") ||
-        ip.startsWith("192.168.") ||
-        ip == "127.0.0.1" || ip == "::1"
+      case Some(ip) => isPrivateIp(ip)
     }
   }
 
   /**
+   * Check if an IP address is in a private/internal range.
+   */
+  def isPrivateIp(ip: String): Boolean = {
+    ip.startsWith("10.") ||
+    ip.startsWith("172.16.") || ip.startsWith("172.17.") || ip.startsWith("172.18.") ||
+    ip.startsWith("172.19.") || ip.startsWith("172.20.") || ip.startsWith("172.21.") ||
+    ip.startsWith("172.22.") || ip.startsWith("172.23.") || ip.startsWith("172.24.") ||
+    ip.startsWith("172.25.") || ip.startsWith("172.26.") || ip.startsWith("172.27.") ||
+    ip.startsWith("172.28.") || ip.startsWith("172.29.") || ip.startsWith("172.30.") ||
+    ip.startsWith("172.31.") ||
+    ip.startsWith("192.168.") ||
+    ip == "127.0.0.1" || ip == "::1"
+  }
+
+  /**
+   * Check if an IP address is in GCP's public IP ranges.
+   * GCP commonly uses these ranges for Cloud NAT, GKE nodes, and other services.
+   *
+   * Note: This is a heuristic. For precise detection, GCP publishes their IP ranges at:
+   * https://www.gstatic.com/ipranges/cloud.json
+   *
+   * @param ip The IP address to check
+   * @return true if the IP appears to be a GCP public IP
+   */
+  def isGcpPublicIp(ip: String): Boolean = {
+    // GCP commonly uses 34.x.x.x and 35.x.x.x ranges
+    // These are the most common ranges for GKE, Cloud Run, Compute Engine, etc.
+    ip.startsWith("34.") || ip.startsWith("35.")
+  }
+
+  /**
    * Determine the egress type based on available information.
+   *
+   * Detection priority:
+   * 1. Private IP (10.x, 172.16-31.x, 192.168.x) => SAME_REGION (internal cluster)
+   * 2. Envoy metadata with GCP region extractable => INTER_REGION
+   * 3. Envoy metadata present + GCP public IP => INTER_REGION (service mesh traffic)
+   * 4. X-Client-Region = "ZZ" => INTER_REGION (GCP internal)
+   * 5. Valid country code in X-Client-Region => INTERNET
+   * 6. Otherwise => UNKNOWN
    *
    * @param clientIp             The client IP address (from X-Forwarded-For)
    * @param envoyPeerMetadata    The X-Envoy-Peer-Metadata header value
@@ -302,20 +331,45 @@ object GcpPricingTier {
       clientRegion: Option[String],
       detectGcpTraffic: Boolean): (EgressType, Option[String]) = {
 
-    // Check for same-cluster traffic first
+    // Check for same-cluster traffic first (private IPs)
     if (isLikelySameClusterTraffic(clientIp)) {
       return (SAME_REGION, None)
     }
 
-    // If GCP traffic detection is enabled, try to extract region from Envoy metadata
+    // If GCP traffic detection is enabled
     if (detectGcpTraffic) {
+      // Try to extract specific GCP region from Envoy metadata
       val gcpRegion = envoyPeerMetadata.flatMap(extractGcpRegionFromEnvoyMetadata)
       if (gcpRegion.isDefined) {
         return (INTER_REGION, gcpRegion)
       }
+
+      // If Envoy metadata is present (service mesh) AND client IP is GCP public range,
+      // this is inter-region GCP traffic even if we can't extract the specific region
+      val hasEnvoyMetadata = envoyPeerMetadata.isDefined
+      val isGcpIp = clientIp.exists(isGcpPublicIp)
+      if (hasEnvoyMetadata && isGcpIp) {
+        return (INTER_REGION, None)
+      }
+
+      // If client IP is GCP range but no Envoy metadata, still likely GCP traffic
+      // (e.g., Cloud Run, Cloud Functions calling directly)
+      if (isGcpIp) {
+        // Check if region header suggests internal traffic
+        clientRegion match {
+          // scalastyle:off caselocale
+          case Some(region) if region.toUpperCase == "ZZ" =>
+          // scalastyle:on caselocale
+            return (INTER_REGION, None)
+          case _ =>
+            // GCP IP but valid country code - could be GCP service with external IP
+            // Classify as inter-region since it's still GCP-to-GCP
+            return (INTER_REGION, None)
+        }
+      }
     }
 
-    // Check if X-Client-Region indicates unknown/internal (ZZ)
+    // Check X-Client-Region for remaining cases
     clientRegion match {
       // scalastyle:off caselocale
       case Some(region) if region.toUpperCase == "ZZ" =>

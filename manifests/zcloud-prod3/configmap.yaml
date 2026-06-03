@@ -23,7 +23,7 @@ data:
     refreshTokenTtlMs: 3600000
     accessLogging:
       enabled: true
-      sourceRegion: "us-central1"
+      sourceRegion: "australia-southeast1"
       detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"

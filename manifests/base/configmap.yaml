@@ -28,8 +28,7 @@ data:
     refreshTokenTtlMs: 3600000
     accessLogging:
       enabled: true
+      sourceRegion: "us-central1"
+      detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
-      clientRegionSubdivisionHeader: "x-client-region-subdivision"
       clientIpHeader: "x-forwarded-for"
-      pricingGroups: {}
-      defaultPricingGroup: "unknown"
