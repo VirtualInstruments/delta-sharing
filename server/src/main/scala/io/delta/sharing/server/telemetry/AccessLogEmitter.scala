@@ -115,12 +115,28 @@ case class PricingContextLogEntry(
     pricingTier: String = "unknown")
 
 /**
+ * Log entry containing all request headers for debugging pricing tier detection.
+ * Emitted alongside PRICING_CONTEXT when header debugging is needed.
+ *
+ * @param share Share name for correlation
+ * @param table Table name for correlation
+ * @param timestampMs Timestamp for correlation with ACCESS_LOG
+ * @param headers All request headers (keys lowercased)
+ */
+case class RequestHeadersLogEntry(
+    share: String,
+    table: String,
+    timestampMs: Long,
+    headers: Map[String, String])
+
+/**
  * Trait for emitting access logs for share data egress tracking.
  * Implementations can write to different destinations (logging, external services, etc.)
  */
 trait AccessLogEmitter {
   def record(entry: AccessLogEntry): Unit
   def recordContext(entry: PricingContextLogEntry): Unit
+  def recordHeaders(entry: RequestHeadersLogEntry): Unit
 }
 
 object AccessLogEmitter {
@@ -146,6 +162,7 @@ object AccessLogEmitter {
 object NoopAccessLogEmitter extends AccessLogEmitter {
   override def record(entry: AccessLogEntry): Unit = {}
   override def recordContext(entry: PricingContextLogEntry): Unit = {}
+  override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {}
 }
 
 /**
@@ -209,6 +226,18 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
     ).flatten.toMap
 
     val logPayload = basePayload ++ optionalPayload
+
+    logger.info(JsonUtils.toJson(logPayload))
+  }
+
+  override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {
+    val logPayload = Map(
+      "logType" -> "REQUEST_HEADERS",
+      "share" -> entry.share,
+      "table" -> entry.table,
+      "timestampMs" -> entry.timestampMs,
+      "headers" -> entry.headers
+    )
 
     logger.info(JsonUtils.toJson(logPayload))
   }

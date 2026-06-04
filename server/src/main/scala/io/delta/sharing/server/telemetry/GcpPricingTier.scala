@@ -243,6 +243,11 @@ object GcpPricingTier {
    * The header is base64-encoded and contains structured metadata including
    * a "gcp_location" field with the region (e.g., "us-central1-f").
    *
+   * The metadata can be in various formats:
+   * - JSON: {"gcp_location":"us-central1-f"}
+   * - Protobuf text: gcp_location:us-central1-f
+   * - Protobuf binary: gcp_location[binary bytes]us-central1-f
+   *
    * @param headerValue The base64-encoded X-Envoy-Peer-Metadata header value
    * @return Optional GCP region extracted from the metadata
    */
@@ -251,9 +256,14 @@ object GcpPricingTier {
 
     Try {
       val decoded = new String(Base64.getDecoder.decode(headerValue), "UTF-8")
-      // The metadata is typically in a protobuf-like format or JSON
-      // Look for patterns like "gcp_location":"us-central1-f" or gcp_location:us-central1-f
-      val gcpLocationPattern = """(?:gcp_location|GCP_LOCATION)["\s:]+([a-z]+-[a-z0-9-]+)""".r
+      // The metadata can be protobuf binary or text format.
+      // In protobuf binary, field names and values are separated by control characters.
+      // We look for "gcp_location" followed by any characters (including binary),
+      // then capture a GCP region pattern.
+      // The region format is: {continent}-{location}{number}[-{zone}]
+      // e.g., us-central1, europe-west1-b, asia-east1-a
+      val gcpLocationPattern =
+        """(?:gcp_location|GCP_LOCATION)[\x00-\x1f\s":]*([a-z]+-[a-z]+\d+(?:-[a-z])?)""".r
       gcpLocationPattern.findFirstMatchIn(decoded).map { m =>
         // Extract region without zone suffix (e.g., "us-central1" from "us-central1-f")
         val fullLocation = m.group(1)
@@ -316,7 +326,8 @@ object GcpPricingTier {
    *
    * Detection priority:
    * 1. Private IP (10.x, 172.16-31.x, 192.168.x) => SAME_REGION (internal cluster)
-   * 2. Envoy metadata with GCP region extractable => INTER_REGION
+   * 2. Envoy metadata with GCP region extractable => SAME_REGION if matches sourceRegion,
+   *    otherwise INTER_REGION
    * 3. Envoy metadata present + GCP public IP => INTER_REGION (service mesh traffic)
    * 4. X-Client-Region = "ZZ" => INTER_REGION (GCP internal)
    * 5. Valid country code in X-Client-Region => INTERNET
@@ -326,13 +337,15 @@ object GcpPricingTier {
    * @param envoyPeerMetadata    The X-Envoy-Peer-Metadata header value
    * @param clientRegion         The client region from X-Client-Region header
    * @param detectGcpTraffic     Whether GCP traffic detection is enabled
+   * @param sourceRegion         The GCP region where this server runs (for same-region detection)
    * @return Tuple of (EgressType, Optional destination GCP region)
    */
   def determineEgressType(
       clientIp: Option[String],
       envoyPeerMetadata: Option[String],
       clientRegion: Option[String],
-      detectGcpTraffic: Boolean): (EgressType, Option[String]) = {
+      detectGcpTraffic: Boolean,
+      sourceRegion: Option[String] = None): (EgressType, Option[String]) = {
 
     // Check for same-cluster traffic first (private IPs)
     if (isLikelySameClusterTraffic(clientIp)) {
@@ -342,9 +355,17 @@ object GcpPricingTier {
     // If GCP traffic detection is enabled
     if (detectGcpTraffic) {
       // Try to extract specific GCP region from Envoy metadata
-      val gcpRegion = envoyPeerMetadata.flatMap(extractGcpRegionFromEnvoyMetadata)
-      if (gcpRegion.isDefined) {
-        return (INTER_REGION, gcpRegion)
+      val clientGcpRegion = envoyPeerMetadata.flatMap(extractGcpRegionFromEnvoyMetadata)
+      if (clientGcpRegion.isDefined) {
+        // If we know both source and client regions, check if they match
+        val isSameRegion = (sourceRegion, clientGcpRegion) match {
+          case (Some(src), Some(dst)) => normalizeRegion(src) == normalizeRegion(dst)
+          case _ => false
+        }
+        if (isSameRegion) {
+          return (SAME_REGION, clientGcpRegion)
+        }
+        return (INTER_REGION, clientGcpRegion)
       }
 
       // If Envoy metadata is present (service mesh) AND client IP is GCP public range,
@@ -386,5 +407,15 @@ object GcpPricingTier {
         // No region header - could be internal or misconfigured
         (UNKNOWN_TYPE, None)
     }
+  }
+
+  /**
+   * Normalize a GCP region string for comparison.
+   * Removes zone suffix (e.g., "us-central1-f" -> "us-central1") and lowercases.
+   */
+  private def normalizeRegion(region: String): String = {
+    val lower = region.toLowerCase(Locale.ROOT).trim
+    // Remove zone letter suffix if present (e.g., -a, -b, -f)
+    lower.replaceAll("-[a-z]$", "")
   }
 }

@@ -50,7 +50,7 @@ import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
 import io.delta.sharing.server.telemetry.{
-  AccessLogEmitter, AccessLogEntry, GcpPricingTier, PricingContextLogEntry
+  AccessLogEmitter, AccessLogEntry, GcpPricingTier, PricingContextLogEntry, RequestHeadersLogEntry
 }
 
 object ErrorCode {
@@ -197,6 +197,16 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
   private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
 
+  private def extractRequestHeaders(req: HttpRequest): Map[String, String] = {
+    req.headers().names().asScala
+      .flatMap { name =>
+        Option(req.headers().get(name)).map { value =>
+          name.toString.toLowerCase(Locale.ROOT) -> value
+        }
+      }
+      .toMap
+  }
+
   private def emitQueryEgressMetric(
       req: HttpRequest,
       share: String,
@@ -209,8 +219,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     }
 
     val nowMs = System.currentTimeMillis()
+    val headers = extractRequestHeaders(req)
     val pricingCtx = DeltaSharingService.buildPricingContext(
-      req,
+      headers,
       serverConfig.getAccessLogging)
 
     // Emit access log with essential fields
@@ -245,6 +256,15 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       pricingTier = pricingCtx.location.pricingTier
     )
     accessLogEmitter.recordContext(contextEntry)
+
+    // Emit all request headers for debugging pricing tier detection
+    val headersEntry = RequestHeadersLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      headers = headers
+    )
+    accessLogEmitter.recordHeaders(headersEntry)
   }
 
   private def emitCdfEgressMetric(
@@ -259,8 +279,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     }
 
     val nowMs = System.currentTimeMillis()
+    val headers = extractRequestHeaders(req)
     val pricingCtx = DeltaSharingService.buildPricingContext(
-      req,
+      headers,
       serverConfig.getAccessLogging)
 
     // Emit access log with essential fields
@@ -295,6 +316,15 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       pricingTier = pricingCtx.location.pricingTier
     )
     accessLogEmitter.recordContext(contextEntry)
+
+    // Emit all request headers for debugging pricing tier detection
+    val headersEntry = RequestHeadersLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      headers = headers
+    )
+    accessLogEmitter.recordHeaders(headersEntry)
   }
 
   private def logCdfRequestComplete(
@@ -1010,7 +1040,8 @@ object DeltaSharingService {
       clientIp,
       envoyPeerMetadata,
       region,
-      detectGcpTraffic)
+      detectGcpTraffic,
+      sourceRegion)
 
     // Calculate continents for context logging
     val sourceContinent = sourceRegion.map(GcpPricingTier.continentFromGcpRegion)

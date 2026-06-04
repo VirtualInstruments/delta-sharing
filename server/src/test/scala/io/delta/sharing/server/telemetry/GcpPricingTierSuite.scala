@@ -251,6 +251,51 @@ class GcpPricingTierSuite extends FunSuite {
     assert(destRegion.isEmpty)
   }
 
+  test("determineEgressType returns SAME_REGION when client GCP region matches source region") {
+    // Create Envoy metadata with gcp_location
+    val payload = """{"gcp_location":"us-central1-f"}"""
+    val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
+
+    val (egressType, destRegion) = determineEgressType(
+      clientIp = Some("34.100.0.1"),
+      envoyPeerMetadata = Some(encoded),
+      clientRegion = Some("US"),
+      detectGcpTraffic = true,
+      sourceRegion = Some("us-central1"))
+    assert(egressType == SAME_REGION)
+    assert(destRegion.contains("us-central1"))
+  }
+
+  test("determineEgressType returns INTER_REGION when client GCP region differs from source region") {
+    // Create Envoy metadata with gcp_location in different region
+    val payload = """{"gcp_location":"europe-west1-b"}"""
+    val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
+
+    val (egressType, destRegion) = determineEgressType(
+      clientIp = Some("34.100.0.1"),
+      envoyPeerMetadata = Some(encoded),
+      clientRegion = Some("DE"),
+      detectGcpTraffic = true,
+      sourceRegion = Some("us-central1"))
+    assert(egressType == INTER_REGION)
+    assert(destRegion.contains("europe-west1"))
+  }
+
+  test("determineEgressType returns SAME_REGION with zone suffix variations") {
+    // Test that "us-central1" matches "us-central1-f"
+    val payload = """{"gcp_location":"us-central1-a"}"""
+    val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
+
+    val (egressType, destRegion) = determineEgressType(
+      clientIp = Some("34.100.0.1"),
+      envoyPeerMetadata = Some(encoded),
+      clientRegion = Some("US"),
+      detectGcpTraffic = true,
+      sourceRegion = Some("us-central1-f"))
+    assert(egressType == SAME_REGION)
+    assert(destRegion.contains("us-central1"))
+  }
+
   // ===== Envoy Metadata Parsing Tests =====
 
   test("extractGcpRegionFromEnvoyMetadata returns None for null/empty") {
@@ -271,5 +316,39 @@ class GcpPricingTierSuite extends FunSuite {
     val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
     val result = extractGcpRegionFromEnvoyMetadata(encoded)
     assert(result.contains("europe-west1"))
+  }
+
+  test("extractGcpRegionFromEnvoyMetadata handles protobuf binary format") {
+    // Simulate protobuf binary where field name and value are separated by control chars
+    // gcp_location + [0x12 0x0f 0x1a 0x0d] + us-central1-f
+    val binaryPayload = "gcp_location\u0012\u000f\u001a\rus-central1-f"
+    val encoded = Base64.getEncoder.encodeToString(binaryPayload.getBytes("UTF-8"))
+    val result = extractGcpRegionFromEnvoyMetadata(encoded)
+    assert(result.contains("us-central1"))
+  }
+
+  test("extractGcpRegionFromEnvoyMetadata parses real Istio/ASM metadata") {
+    // Real X-Envoy-Peer-Metadata from Istio ingress gateway (GKE with ASM)
+    // Contains PLATFORM_METADATA with gcp_location:us-central1-f
+    val realMetadata = "ChQKDkFQUF9DT05UQUlORVJTEgIaAAo9CgpDTFVTVEVSX0lEEi8aLWNuLXppbmct" +
+      "ZGV2LTE5NzUyMi11cy1jZW50cmFsMS1mLXppbmctY2x1c3RlcgoeCgxJTlNUQU5DRV9JUFMSDhoM" +
+      "MTAuMjUyLjguMTI3CiAKDUlTVElPX1ZFUlNJT04SDxoNMS4yMC44LWFzbS43MwqzAgoGTEFCRUxT" +
+      "EqgCKqUCCh0KA2FwcBIWGhRpc3Rpby1pbmdyZXNzZ2F0ZXdheQoZCgVpc3RpbxIQGg5pbmdyZXNz" +
+      "Z2F0ZXdheQodCgxpc3Rpby5pby9yZXYSDRoLYXNtLW1hbmFnZWQKOQofc2VydmljZS5pc3Rpby5p" +
+      "by9jYW5vbmljYWwtbmFtZRIWGhRpc3Rpby1pbmdyZXNzZ2F0ZXdheQovCiNzZXJ2aWNlLmlzdGlv" +
+      "LmlvL2Nhbm9uaWNhbC1yZXZpc2lvbhIIGgZsYXRlc3QKLgoddG9wb2xvZ3kua3ViZXJuZXRlcy5p" +
+      "by9yZWdpb24SDRoLdXMtY2VudHJhbDEKLgobdG9wb2xvZ3kua3ViZXJuZXRlcy5pby96b25lEg8a" +
+      "DXVzLWNlbnRyYWwxLWMKHgoHTUVTSF9JRBITGhFwcm9qLTMwMzkzMzg2ODgxMAovCgROQU1FEica" +
+      "JWlzdGlvLWluZ3Jlc3NnYXRld2F5LTY2NjRjZGRkN2YtamM5bTIKGwoJTkFNRVNQQUNFEg4aDGlz" +
+      "dGlvLXN5c3RlbQpdCgVPV05FUhJUGlJrdWJlcm5ldGVzOi8vYXBpcy9hcHBzL3YxL25hbWVzcGFj" +
+      "ZXMvaXN0aW8tc3lzdGVtL2RlcGxveW1lbnRzL2lzdGlvLWluZ3Jlc3NnYXRld2F5CrACChFQTEFU" +
+      "Rk9STV9NRVRBREFUQRKaAiqXAgomChRnY3BfZ2tlX2NsdXN0ZXJfbmFtZRIOGgx6aW5nLWNsdXN0" +
+      "ZXIKgwEKE2djcF9na2VfY2x1c3Rlcl91cmwSbBpqaHR0cHM6Ly9jb250YWluZXIuZ29vZ2xlYXBp" +
+      "cy5jb20vdjEvcHJvamVjdHMvemluZy1kZXYtMTk3NTIyL2xvY2F0aW9ucy91cy1jZW50cmFsMS1m" +
+      "L2NsdXN0ZXJzL3ppbmctY2x1c3RlcgofCgxnY3BfbG9jYXRpb24SDxoNdXMtY2VudHJhbDEtZgog" +
+      "CgtnY3BfcHJvamVjdBIRGg96aW5nLWRldi0xOTc1MjIKJAoSZ2NwX3Byb2plY3RfbnVtYmVyEg4a" +
+      "DDMwMzkzMzg2ODgxMAonCg1XT1JLTE9BRF9OQU1FEhYaFGlzdGlvLWluZ3Jlc3NnYXRld2F5"
+    val result = extractGcpRegionFromEnvoyMetadata(realMetadata)
+    assert(result.contains("us-central1"), s"Expected us-central1 but got $result")
   }
 }
