@@ -175,8 +175,11 @@ object GcpPricingTier {
       case INTER_REGION =>
         val srcContinent = sourceRegion
           .map(continentFromGcpRegion).getOrElse(UNKNOWN_CONTINENT)
+        // For inter-region, try GCP region first, fall back to country code
         val dstContinent = destinationRegion
-          .map(continentFromGcpRegion).getOrElse(UNKNOWN_CONTINENT)
+          .map(continentFromGcpRegion)
+          .orElse(destinationCountry.map(continentFromCountryCode))
+          .getOrElse(UNKNOWN_CONTINENT)
         calculateInterRegionTier(srcContinent, dstContinent)
 
       case INTERNET =>
