@@ -139,16 +139,12 @@ case class AccessLoggingConfig(
     @BeanProperty var enabled: Boolean,
     // Header that contains the client region code (for example: US, DE).
     @BeanProperty var clientRegionHeader: String,
-    // Header that contains the client region subdivision (for example: USCA, DEBE).
-    @BeanProperty var clientRegionSubdivisionHeader: String,
     // Header that contains client IP or forwarding chain (for example: X-Forwarded-For).
     @BeanProperty var clientIpHeader: String,
-    // Optional mapping from region/subdivision codes to pricing group labels.
-    // Keys should be uppercase location codes (for example: US, DE, USCA).
+    // Optional mapping from region codes to pricing group labels.
+    // Keys should be uppercase location codes (for example: US, DE).
     // A wildcard key "*" can be used as a catch-all default.
     @BeanProperty var pricingGroups: java.util.Map[String, String],
-    // Fallback group when no mapping and no region are available.
-    @BeanProperty var defaultPricingGroup: String,
     // The GCP region where this server runs (for example: us-central1).
     // Used for pricing tier calculation based on source→destination pairs.
     @BeanProperty var sourceRegion: String,
@@ -161,19 +157,14 @@ case class AccessLoggingConfig(
     this(
       enabled = false,
       clientRegionHeader = "x-client-region",
-      clientRegionSubdivisionHeader = "x-client-region-subdivision",
       clientIpHeader = "x-forwarded-for",
       pricingGroups = Collections.emptyMap(),
-      defaultPricingGroup = "unknown",
       sourceRegion = "",
       detectGcpTraffic = true)
   }
 
   override def checkConfig(): Unit = {
-    if (defaultPricingGroup == null || defaultPricingGroup.trim.isEmpty) {
-      throw new IllegalArgumentException(
-        "'defaultPricingGroup' in 'accessLogging' must be provided")
-    }
+    // No required fields to validate
   }
 }
 

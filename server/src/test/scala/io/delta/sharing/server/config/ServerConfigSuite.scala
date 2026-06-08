@@ -125,10 +125,8 @@ class ServerConfigSuite extends FunSuite {
     val accessLogging = new AccessLoggingConfig()
     accessLogging.setEnabled(true)
     accessLogging.setClientRegionHeader("x-client-region")
-    accessLogging.setClientRegionSubdivisionHeader("x-client-region-subdivision")
     accessLogging.setClientIpHeader("x-forwarded-for")
     accessLogging.setPricingGroups(Collections.singletonMap("US", "na-tier-1"))
-    accessLogging.setDefaultPricingGroup("unknown")
     serverConfig.setAccessLogging(accessLogging)
     testConfig(
       """version: 1
@@ -142,11 +140,9 @@ class ServerConfigSuite extends FunSuite {
         |accessLogging:
         |  enabled: true
         |  clientRegionHeader: x-client-region
-        |  clientRegionSubdivisionHeader: x-client-region-subdivision
         |  clientIpHeader: x-forwarded-for
         |  pricingGroups:
         |    US: na-tier-1
-        |  defaultPricingGroup: unknown
         |""".stripMargin,
       serverConfig)
   }
@@ -209,11 +205,6 @@ class ServerConfigSuite extends FunSuite {
     val accessLogging = new AccessLoggingConfig()
     accessLogging.setEnabled(true)
     accessLogging.checkConfig()
-
-    accessLogging.setDefaultPricingGroup("   ")
-    assertInvalidConfig("'defaultPricingGroup' in 'accessLogging' must be provided") {
-      accessLogging.checkConfig()
-    }
   }
 
   test("SSLConfig") {

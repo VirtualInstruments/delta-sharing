@@ -124,9 +124,7 @@ accessLogging:
   sourceRegion: "us-central1"           # GCP region where server runs
   detectGcpTraffic: true                # Enable GCP IP range lookup
   clientRegionHeader: "x-client-region" # Header with country code
-  clientRegionSubdivisionHeader: "x-client-region-subdivision"
   clientIpHeader: "x-forwarded-for"     # Header with client IP chain
-  defaultPricingGroup: "unknown"        # Fallback when location unknown
 ```
 
 ### GCP Load Balancer Headers
@@ -184,8 +182,6 @@ X-Client-Region-Subdivision: {client_region_subdivision}
 **Client IP Headers:**
 1. Configured `clientIpHeader` (default: `x-forwarded-for`)
 2. `x-envoy-external-address`
-3. `x-real-ip`
-4. `true-client-ip`
 
 ---
 

@@ -74,18 +74,13 @@ accessLogging:
   # In GCP, configure your load balancer backend custom request headers to inject this.
   # Example: X-Client-Region:{client_region}
   clientRegionHeader: "x-client-region"
-  # Name of the incoming header that carries client subdivision (for example: USCA).
-  # Example: X-Client-Region-Subdivision:{client_region_subdivision}
-  clientRegionSubdivisionHeader: "x-client-region-subdivision"
   # Name of the incoming header that carries client IP information.
   # This is typically a forwarding chain header and does not require LB changes when already present.
   clientIpHeader: "x-forwarded-for"
-  # Optional mapping from region/subdivision codes to billing price groups.
+  # Optional mapping from region codes to billing price groups.
   # Use uppercase keys. A wildcard key "*" can be used as a catch-all.
   # If empty, server applies a built-in default map (na_eu/apac/latam buckets).
   pricingGroups: {}
-  # Fallback pricing group when no location can be resolved.
-  defaultPricingGroup: "unknown"
   # GCP region where this server runs (for example: us-central1).
   # Required for GCP pricing tier calculation.
   # Used to determine source→destination pairs for egress cost attribution.

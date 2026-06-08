@@ -888,14 +888,9 @@ object DeltaSharingService {
     "x-appengine-country",
     "cf-ipcountry",
     "cloudfront-viewer-country")
-  private val DefaultSubdivisionHeaders = Seq(
-    "x-client-region-subdivision",
-    "x-appengine-region")
   private val DefaultIpHeaders = Seq(
     "x-forwarded-for",
-    "x-envoy-external-address",
-    "x-real-ip",
-    "true-client-ip")
+    "x-envoy-external-address")
   private val DefaultPricingGroupsByRegion = Map(
     "US" -> "na_eu",
     "CA" -> "na_eu",

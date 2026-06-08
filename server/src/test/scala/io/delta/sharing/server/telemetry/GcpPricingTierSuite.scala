@@ -340,7 +340,9 @@ class GcpPricingTierSuite extends FunSuite with BeforeAndAfterEach {
     assert(destRegion.contains("us-central1"))
   }
 
+  // scalastyle:off
   test("determineEgressType returns INTER_REGION when client GCP region differs from source region") {
+  // scalastyle:on
     // Use IP from europe-west1 range (35.187.0.0/17 is in our test data)
     val (egressType, destRegion) = determineEgressType(
       clientIp = Some("35.187.64.100"),  // GCP IP in europe-west1 range
