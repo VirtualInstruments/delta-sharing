@@ -18,12 +18,72 @@ package io.delta.sharing.server.telemetry
 
 import java.util.Base64
 
-import org.scalatest.FunSuite
+import org.scalatest.{BeforeAndAfterEach, FunSuite}
 
-class GcpPricingTierSuite extends FunSuite {
+class GcpPricingTierSuite extends FunSuite with BeforeAndAfterEach {
   import GcpPricingTier._
   import GcpPricingTier.Continent._
   import GcpPricingTier.EgressType._
+
+  // Sample GCP IP ranges for testing
+  private val testRangesJson =
+    """
+    {
+      "syncToken": "1234567890",
+      "creationTime": "2026-06-01T00:00:00.000000",
+      "prefixes": [
+        {
+          "ipv4Prefix": "34.44.0.0/15",
+          "service": "Google Cloud",
+          "scope": "us-central1"
+        },
+        {
+          "ipv4Prefix": "34.72.0.0/16",
+          "service": "Google Cloud",
+          "scope": "us-central1"
+        },
+        {
+          "ipv4Prefix": "34.73.0.0/16",
+          "service": "Google Cloud",
+          "scope": "us-east1"
+        },
+        {
+          "ipv4Prefix": "35.187.0.0/17",
+          "service": "Google Cloud",
+          "scope": "europe-west1"
+        },
+        {
+          "ipv4Prefix": "34.87.0.0/17",
+          "service": "Google Cloud",
+          "scope": "asia-southeast1"
+        },
+        {
+          "ipv4Prefix": "34.151.64.0/18",
+          "service": "Google Cloud",
+          "scope": "australia-southeast1"
+        },
+        {
+          "ipv4Prefix": "34.95.128.0/17",
+          "service": "Google Cloud",
+          "scope": "southamerica-east1"
+        },
+        {
+          "ipv4Prefix": "34.100.0.0/16",
+          "service": "Google Cloud",
+          "scope": "us-central1"
+        }
+      ]
+    }
+    """
+
+  override def beforeEach(): Unit = {
+    GcpIpRangeLookup.reset()
+    GcpIpRangeLookup.loadFromJson(testRangesJson)
+  }
+
+  override def afterEach(): Unit = {
+    GcpIpRangeLookup.reset()
+  }
 
   // ===== Continent Mapping Tests =====
 
@@ -231,9 +291,10 @@ class GcpPricingTierSuite extends FunSuite {
     assert(destRegion.isEmpty)
   }
 
-  test("determineEgressType returns INTER_REGION when ZZ region detected") {
+  test("determineEgressType returns INTER_REGION for GCP IP not in ranges with ZZ region") {
+    // Use a GCP-looking IP that's not in our test ranges
     val (egressType, destRegion) = determineEgressType(
-      clientIp = Some("34.100.0.1"),
+      clientIp = Some("34.200.0.1"),  // GCP-looking IP not in test ranges
       envoyPeerMetadata = None,
       clientRegion = Some("ZZ"),
       detectGcpTraffic = true)
@@ -251,14 +312,27 @@ class GcpPricingTierSuite extends FunSuite {
     assert(destRegion.isEmpty)
   }
 
-  test("determineEgressType returns SAME_REGION when client GCP region matches source region") {
-    // Create Envoy metadata with gcp_location
+  test("determineEgressType returns INTERNET for non-GCP IP even with Envoy metadata") {
+    // This is the critical test: non-GCP IP (like from Malta) should be INTERNET
+    // even if Envoy metadata contains gcp_location (which is the ingress gateway's location)
     val payload = """{"gcp_location":"us-central1-f"}"""
     val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
 
     val (egressType, destRegion) = determineEgressType(
-      clientIp = Some("34.100.0.1"),
-      envoyPeerMetadata = Some(encoded),
+      clientIp = Some("217.9.6.27"),  // Non-GCP IP from Malta (not in any GCP range)
+      envoyPeerMetadata = Some(encoded),  // Ingress gateway's metadata (should be ignored)
+      clientRegion = Some("MT"),
+      detectGcpTraffic = true,
+      sourceRegion = Some("us-central1"))
+    assert(egressType == INTERNET, "Non-GCP IP should be classified as INTERNET")
+    assert(destRegion.isEmpty, "No GCP region for non-GCP IPs")
+  }
+
+  test("determineEgressType returns SAME_REGION when client GCP region matches source region") {
+    // Use IP from us-central1 range (34.100.0.0/16 is in our test data)
+    val (egressType, destRegion) = determineEgressType(
+      clientIp = Some("34.100.0.1"),  // GCP IP in us-central1 range
+      envoyPeerMetadata = None,  // Not used anymore
       clientRegion = Some("US"),
       detectGcpTraffic = true,
       sourceRegion = Some("us-central1"))
@@ -267,13 +341,10 @@ class GcpPricingTierSuite extends FunSuite {
   }
 
   test("determineEgressType returns INTER_REGION when client GCP region differs from source region") {
-    // Create Envoy metadata with gcp_location in different region
-    val payload = """{"gcp_location":"europe-west1-b"}"""
-    val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
-
+    // Use IP from europe-west1 range (35.187.0.0/17 is in our test data)
     val (egressType, destRegion) = determineEgressType(
-      clientIp = Some("34.100.0.1"),
-      envoyPeerMetadata = Some(encoded),
+      clientIp = Some("35.187.64.100"),  // GCP IP in europe-west1 range
+      envoyPeerMetadata = None,  // Not used anymore
       clientRegion = Some("DE"),
       detectGcpTraffic = true,
       sourceRegion = Some("us-central1"))
@@ -282,18 +353,32 @@ class GcpPricingTierSuite extends FunSuite {
   }
 
   test("determineEgressType returns SAME_REGION with zone suffix variations") {
-    // Test that "us-central1" matches "us-central1-f"
-    val payload = """{"gcp_location":"us-central1-a"}"""
+    // Test that "us-central1" source matches client IP in us-central1 range
+    val (egressType, destRegion) = determineEgressType(
+      clientIp = Some("34.100.0.1"),  // GCP IP in us-central1 range
+      envoyPeerMetadata = None,  // Not used anymore
+      clientRegion = Some("US"),
+      detectGcpTraffic = true,
+      sourceRegion = Some("us-central1-f"))  // With zone suffix
+    assert(egressType == SAME_REGION)
+    assert(destRegion.contains("us-central1"))
+  }
+
+  test("determineEgressType uses IP lookup instead of Envoy metadata") {
+    // Even with Envoy metadata pointing to us-central1, if the IP is in europe-west1,
+    // the lookup should return europe-west1
+    val payload = """{"gcp_location":"us-central1-f"}"""
     val encoded = Base64.getEncoder.encodeToString(payload.getBytes("UTF-8"))
 
     val (egressType, destRegion) = determineEgressType(
-      clientIp = Some("34.100.0.1"),
-      envoyPeerMetadata = Some(encoded),
-      clientRegion = Some("US"),
+      clientIp = Some("35.187.64.100"),  // GCP IP in europe-west1 range
+      envoyPeerMetadata = Some(encoded),  // Should be ignored
+      clientRegion = Some("DE"),
       detectGcpTraffic = true,
-      sourceRegion = Some("us-central1-f"))
-    assert(egressType == SAME_REGION)
-    assert(destRegion.contains("us-central1"))
+      sourceRegion = Some("us-central1"))
+    assert(egressType == INTER_REGION)
+    // The region should come from IP lookup, not Envoy metadata
+    assert(destRegion.contains("europe-west1"))
   }
 
   // ===== Envoy Metadata Parsing Tests =====

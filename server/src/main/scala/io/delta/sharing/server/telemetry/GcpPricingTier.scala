@@ -326,18 +326,21 @@ object GcpPricingTier {
    *
    * Detection priority:
    * 1. Private IP (10.x, 172.16-31.x, 192.168.x) => SAME_REGION (internal cluster)
-   * 2. Envoy metadata with GCP region extractable => SAME_REGION if matches sourceRegion,
-   *    otherwise INTER_REGION
-   * 3. Envoy metadata present + GCP public IP => INTER_REGION (service mesh traffic)
-   * 4. X-Client-Region = "ZZ" => INTER_REGION (GCP internal)
-   * 5. Valid country code in X-Client-Region => INTERNET
-   * 6. Otherwise => UNKNOWN
+   * 2. GCP IP detected via IP range lookup => Use exact region from lookup
+   *    a. If client region matches source region => SAME_REGION
+   *    b. Otherwise => INTER_REGION (with exact client region for pricing)
+   * 3. Non-GCP IP with valid country code => INTERNET
+   * 4. Otherwise => UNKNOWN
+   *
+   * NOTE: The x-envoy-peer-metadata header is NOT used for region detection
+   * because it contains the INGRESS GATEWAY's location, not the actual
+   * client's location. We use GCP's published IP ranges instead.
    *
    * @param clientIp             The client IP address (from X-Forwarded-For)
-   * @param envoyPeerMetadata    The X-Envoy-Peer-Metadata header value
+   * @param envoyPeerMetadata    Unused, kept for API compatibility
    * @param clientRegion         The client region from X-Client-Region header
    * @param detectGcpTraffic     Whether GCP traffic detection is enabled
-   * @param sourceRegion         The GCP region where this server runs (for same-region detection)
+   * @param sourceRegion         The GCP region where this server runs
    * @return Tuple of (EgressType, Optional destination GCP region)
    */
   def determineEgressType(
@@ -352,54 +355,45 @@ object GcpPricingTier {
       return (SAME_REGION, None)
     }
 
-    // If GCP traffic detection is enabled
+    // If GCP traffic detection is enabled, use IP range lookup for accurate region detection
     if (detectGcpTraffic) {
-      // Try to extract specific GCP region from Envoy metadata
-      val clientGcpRegion = envoyPeerMetadata.flatMap(extractGcpRegionFromEnvoyMetadata)
-      if (clientGcpRegion.isDefined) {
-        // If we know both source and client regions, check if they match
-        val isSameRegion = (sourceRegion, clientGcpRegion) match {
-          case (Some(src), Some(dst)) => normalizeRegion(src) == normalizeRegion(dst)
-          case _ => false
-        }
-        if (isSameRegion) {
-          return (SAME_REGION, clientGcpRegion)
-        }
-        return (INTER_REGION, clientGcpRegion)
-      }
+      clientIp.flatMap(GcpIpRangeLookup.lookupRegion) match {
+        case Some(clientGcpRegion) =>
+          // We have exact GCP region from IP lookup
+          val isSameRegion = sourceRegion match {
+            case Some(src) => normalizeRegion(src) == normalizeRegion(clientGcpRegion)
+            case None => false
+          }
+          if (isSameRegion) {
+            return (SAME_REGION, Some(clientGcpRegion))
+          }
+          return (INTER_REGION, Some(clientGcpRegion))
 
-      // If Envoy metadata is present (service mesh) AND client IP is GCP public range,
-      // this is inter-region GCP traffic even if we can't extract the specific region
-      val hasEnvoyMetadata = envoyPeerMetadata.isDefined
-      val isGcpIp = clientIp.exists(isGcpPublicIp)
-      if (hasEnvoyMetadata && isGcpIp) {
-        return (INTER_REGION, None)
-      }
-
-      // If client IP is GCP range but no Envoy metadata, still likely GCP traffic
-      // (e.g., Cloud Run, Cloud Functions calling directly)
-      if (isGcpIp) {
-        // Check if region header suggests internal traffic
-        clientRegion match {
-          // scalastyle:off caselocale
-          case Some(region) if region.toUpperCase == "ZZ" =>
-          // scalastyle:on caselocale
-            return (INTER_REGION, None)
-          case _ =>
-            // GCP IP but valid country code - could be GCP service with external IP
-            // Classify as inter-region since it's still GCP-to-GCP
-            return (INTER_REGION, None)
-        }
+        case None =>
+          // IP not found in GCP ranges - check if it might still be GCP
+          // (fallback for any gaps in the published ranges)
+          if (clientIp.exists(isGcpPublicIp)) {
+            // IP looks like GCP but not in ranges - classify as inter-region conservatively
+            clientRegion match {
+              // scalastyle:off caselocale
+              case Some(region) if region.toUpperCase == "ZZ" =>
+              // scalastyle:on caselocale
+                return (INTER_REGION, None)
+              case _ =>
+                return (INTER_REGION, None)
+            }
+          }
+          // Not a GCP IP - fall through to internet traffic detection
       }
     }
 
-    // Check X-Client-Region for remaining cases
+    // Non-GCP client IP - this is internet traffic
     clientRegion match {
       // scalastyle:off caselocale
       case Some(region) if region.toUpperCase == "ZZ" =>
       // scalastyle:on caselocale
-        // ZZ typically means GCP couldn't determine the location (internal traffic)
-        (INTER_REGION, None)
+        // ZZ typically means GCP couldn't determine the location
+        (INTERNET, None)
       case Some(_) =>
         // Has a valid country code - this is internet traffic
         (INTERNET, None)
