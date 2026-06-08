@@ -16,6 +16,8 @@
 
 package io.delta.sharing.server.telemetry
 
+import java.util.Locale
+
 import org.slf4j.LoggerFactory
 
 import io.delta.sharing.server.common.JsonUtils
@@ -230,13 +232,35 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
     logger.info(JsonUtils.toJson(logPayload))
   }
 
+  // Headers that should be redacted to prevent leaking secrets/PII
+  private val sensitiveHeaders = Set(
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "proxy-authorization",
+    "www-authenticate",
+    "x-csrf-token",
+    "x-xsrf-token"
+  )
+
   override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {
+    // Redact sensitive headers to prevent leaking secrets/PII
+    val redactedHeaders = entry.headers.map { case (key, value) =>
+      if (sensitiveHeaders.contains(key.toLowerCase(Locale.ROOT))) {
+        key -> "[REDACTED]"
+      } else {
+        key -> value
+      }
+    }
+
     val logPayload = Map(
       "logType" -> "REQUEST_HEADERS",
       "share" -> entry.share,
       "table" -> entry.table,
       "timestampMs" -> entry.timestampMs,
-      "headers" -> entry.headers
+      "headers" -> redactedHeaders
     )
 
     logger.info(JsonUtils.toJson(logPayload))

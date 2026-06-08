@@ -24,6 +24,8 @@ import scala.collection.mutable
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
+import org.slf4j.LoggerFactory
+
 import io.delta.sharing.server.common.JsonUtils
 
 /**
@@ -36,6 +38,8 @@ import io.delta.sharing.server.common.JsonUtils
  * any new allocations from GCP.
  */
 object GcpIpRangeLookup {
+
+  private val logger = LoggerFactory.getLogger("delta.sharing.gcp.ip.lookup")
 
   private val GCP_IP_RANGES_URL = "https://www.gstatic.com/ipranges/cloud.json"
   private val REFRESH_INTERVAL_HOURS = 24
@@ -230,14 +234,9 @@ object GcpIpRangeLookup {
           cachedTrie.set(newTrie)
           lastRefreshTime.set(System.currentTimeMillis())
           isInitialized.set(true)
-          // scalastyle:off println
-          System.out.println(s"[GcpIpRangeLookup] Loaded ${ranges.prefixes.size} IP ranges " +
-            s"(syncToken: ${ranges.syncToken})")
-          // scalastyle:on println
+          logger.info(s"Loaded ${ranges.prefixes.size} IP ranges (syncToken: ${ranges.syncToken})")
         case Failure(e) =>
-          // scalastyle:off println
-          System.err.println(s"[GcpIpRangeLookup] Failed to refresh IP ranges: ${e.getMessage}")
-          // scalastyle:on println
+          logger.warn(s"Failed to refresh IP ranges: ${e.getMessage}")
           // Keep using the old trie if we have one
           if (!isInitialized.get()) {
             // First-time failure - create empty trie
@@ -247,9 +246,7 @@ object GcpIpRangeLookup {
       }
     } catch {
       case NonFatal(e) =>
-        // scalastyle:off println
-        System.err.println(s"[GcpIpRangeLookup] Unexpected error during refresh: ${e.getMessage}")
-        // scalastyle:on println
+        logger.error(s"Unexpected error during refresh: ${e.getMessage}")
     }
   }
 

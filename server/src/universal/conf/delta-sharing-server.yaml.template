@@ -79,13 +79,12 @@ accessLogging:
   clientIpHeader: "x-forwarded-for"
   # Optional mapping from region codes to billing price groups.
   # Use uppercase keys. A wildcard key "*" can be used as a catch-all.
-  # If empty, server applies a built-in default map (na_eu/apac/latam buckets).
+  # NOTE: pricingGroups is reserved for future use and not currently applied.
   pricingGroups: {}
   # GCP region where this server runs (for example: us-central1).
-  # Required for GCP pricing tier calculation.
   # Used to determine source→destination pairs for egress cost attribution.
   sourceRegion: ""
-  # Enable GCP inter-region traffic detection via X-Envoy-Peer-Metadata header.
-  # When true, traffic from other GCP regions is classified as inter-region (cheaper)
-  # rather than internet egress. Set to false to disable detection.
+  # Enable GCP traffic detection using GCP's published IP ranges (cloud.json).
+  # When true, client IPs belonging to other GCP regions can be classified as inter-region
+  # (cheaper) rather than internet egress. Set to false to disable this detection.
   detectGcpTraffic: true

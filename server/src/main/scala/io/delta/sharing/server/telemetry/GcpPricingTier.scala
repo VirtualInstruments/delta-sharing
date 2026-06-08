@@ -355,8 +355,10 @@ object GcpPricingTier {
       return (SAME_REGION, None)
     }
 
-    // If GCP traffic detection is enabled, use IP range lookup for accurate region detection
-    if (detectGcpTraffic) {
+    // If GCP traffic detection is enabled and the IP looks like GCP, use IP range lookup for
+    // accurate region detection. This avoids unnecessary initialization/refresh overhead for
+    // non-GCP internet clients.
+    if (detectGcpTraffic && clientIp.exists(isGcpPublicIp)) {
       clientIp.flatMap(GcpIpRangeLookup.lookupRegion) match {
         case Some(clientGcpRegion) =>
           // We have exact GCP region from IP lookup

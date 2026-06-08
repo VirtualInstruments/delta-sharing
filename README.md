@@ -447,7 +447,9 @@ Fields emitted in each log line:
 - `table`
 - `requestType` (`query` or `cdf_stream`)
 - `egressBytes`
+- `pricingTier`
 - `timestampMs`
+- `clientRegion` (if available)
 
 To enable this feature, configure the `accessLogging` block in the server yaml.
 

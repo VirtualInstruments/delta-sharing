@@ -213,6 +213,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       schema: String,
       table: String,
       actions: Seq[Object]): Unit = {
+    if (!Option(serverConfig.getAccessLogging).exists(_.enabled)) {
+      return
+    }
+
     val bytes = DeltaSharingService.extractEgressBytes(actions)
     if (bytes <= 0) {
       return
@@ -273,6 +277,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       schema: String,
       table: String,
       actions: Seq[Object]): Unit = {
+    if (!Option(serverConfig.getAccessLogging).exists(_.enabled)) {
+      return
+    }
+
     val bytes = DeltaSharingService.extractEgressBytes(actions)
     if (bytes <= 0) {
       return
@@ -1120,11 +1128,26 @@ object DeltaSharingService {
   }
 
   private def isValidIp(ip: String): Boolean = {
-    try {
-      InetAddress.getByName(ip)
-      true
-    } catch {
-      case _: Throwable => false
+    // Validate IP format without DNS resolution to avoid latency and security issues
+    val ipv4Pattern = """^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$""".r
+    val ipv6Pattern = """^([0-9a-fA-F:]+)$""".r
+
+    ip match {
+      case ipv4Pattern(a, b, c, d) =>
+        Seq(a, b, c, d).forall { octet =>
+          val n = octet.toInt
+          n >= 0 && n <= 255
+        }
+      case ipv6Pattern(_) =>
+        try {
+          // For IPv6, use InetAddress but only for format validation
+          // This won't trigger DNS since it matches the IPv6 pattern
+          InetAddress.getByName(ip)
+          true
+        } catch {
+          case _: Throwable => false
+        }
+      case _ => false
     }
   }
 

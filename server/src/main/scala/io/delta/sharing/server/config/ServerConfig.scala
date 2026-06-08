@@ -144,13 +144,14 @@ case class AccessLoggingConfig(
     // Optional mapping from region codes to pricing group labels.
     // Keys should be uppercase location codes (for example: US, DE).
     // A wildcard key "*" can be used as a catch-all default.
+    // NOTE: pricingGroups is reserved for future use and not currently applied.
     @BeanProperty var pricingGroups: java.util.Map[String, String],
     // The GCP region where this server runs (for example: us-central1).
     // Used for pricing tier calculation based on source→destination pairs.
     @BeanProperty var sourceRegion: String,
-    // Enable GCP inter-region traffic detection via X-Envoy-Peer-Metadata header.
-    // When true, traffic from other GCP regions is classified as inter-region (cheaper)
-    // rather than internet egress.
+    // Enable GCP traffic detection using GCP's published IP ranges (cloud.json).
+    // When true, client IPs belonging to other GCP regions can be classified as inter-region
+    // (cheaper) rather than internet egress. Set to false to disable this detection.
     @BeanProperty var detectGcpTraffic: Boolean) extends ConfigItem {
 
   def this() = {
