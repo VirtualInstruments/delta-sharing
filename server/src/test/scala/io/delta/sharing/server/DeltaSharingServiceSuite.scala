@@ -38,9 +38,23 @@ import io.delta.sharing.server.common.actions.{ColumnMappingTableFeature, Deleti
 import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model._
 import io.delta.sharing.server.protocol._
+import io.delta.sharing.server.telemetry.GcpIpRangeLookup
 
 // scalastyle:off maxLineLength
 class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
+
+  // Test IP ranges for deterministic GCP IP lookup tests
+  // Prevents live HTTP fetch to gstatic.com during tests
+  private val testGcpIpRangesJson =
+    """
+    {
+      "syncToken": "test",
+      "creationTime": "2026-06-01T00:00:00.000000",
+      "prefixes": [
+        {"ipv4Prefix": "34.100.0.0/16", "service": "Google Cloud", "scope": "us-central1"}
+      ]
+    }
+    """
 
   def shouldRunIntegrationTest: Boolean = {
     sys.env.get("AWS_ACCESS_KEY_ID").exists(_.length > 0) &&
@@ -371,6 +385,9 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
   }
 
   test("buildClientLocationContext calculates inter-region tier for ZZ region") {
+    // Load deterministic IP ranges to avoid live HTTP fetch
+    GcpIpRangeLookup.loadFromJson(testGcpIpRangesJson)
+
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
     cfg.setSourceRegion("us-central1")
@@ -384,8 +401,8 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
       cfg)
 
     assert(ctx.clientRegion.contains("ZZ"))
-    // Inter-region from NA (us-central1) to unknown -> internet fallback
-    assert(ctx.pricingTier.startsWith("inter") || ctx.pricingTier == "unknown")
+    // With deterministic IP ranges, 34.100.0.1 maps to us-central1 (same as sourceRegion)
+    assert(ctx.pricingTier == "same_region")
   }
 
   test("buildClientLocationContext calculates internet tier without source region") {
@@ -406,6 +423,9 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
   }
 
   test("buildClientLocationContext returns interregion_unknown for GCP IP without source") {
+    // Load deterministic IP ranges to avoid live HTTP fetch
+    GcpIpRangeLookup.loadFromJson(testGcpIpRangesJson)
+
     val cfg = new AccessLoggingConfig()
     cfg.setEnabled(true)
     cfg.setDetectGcpTraffic(true)

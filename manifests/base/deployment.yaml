@@ -44,6 +44,7 @@ spec:
               configMapKeyRef:
                 name: project-common
                 key: PROJECT_ID
+                optional: true
           volumeMounts:
             - name: base-config
               mountPath: /base-config
@@ -59,6 +60,7 @@ spec:
               configMapKeyRef:
                 name: project-common
                 key: PROJECT_ID
+                optional: true
           - name: ZC_API_PROXY_DL_SHARING_BEARER
             valueFrom:
               secretKeyRef:

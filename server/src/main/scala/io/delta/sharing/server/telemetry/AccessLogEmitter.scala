@@ -229,7 +229,10 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
 
     val logPayload = basePayload ++ optionalPayload
 
-    logger.info(JsonUtils.toJson(logPayload))
+    // Use DEBUG level for context logs to reduce volume/costs - only enable intentionally
+    if (logger.isDebugEnabled) {
+      logger.debug(JsonUtils.toJson(logPayload))
+    }
   }
 
   // Headers that should be redacted to prevent leaking secrets/PII
@@ -263,6 +266,9 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
       "headers" -> redactedHeaders
     )
 
-    logger.info(JsonUtils.toJson(logPayload))
+    // Use DEBUG level for header logs - high-volume and can leak sensitive data
+    if (logger.isDebugEnabled) {
+      logger.debug(JsonUtils.toJson(logPayload))
+    }
   }
 }

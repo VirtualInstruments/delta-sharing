@@ -150,12 +150,18 @@ object GcpIpRangeLookup {
 
     /**
      * Parse a CIDR notation string into (ip bytes, prefix length).
+     * Validates that the prefix length is valid for the address type.
      */
     private def parseCidr(cidr: String): Option[(Array[Byte], Int)] = {
       Try {
         val parts = cidr.split("/")
         val ipBytes = InetAddress.getByName(parts(0)).getAddress
         val prefixLen = parts(1).toInt
+        val maxPrefixLen = ipBytes.length * 8 // 32 for IPv4, 128 for IPv6
+        if (prefixLen < 0 || prefixLen > maxPrefixLen) {
+          throw new IllegalArgumentException(
+            s"Invalid prefix length $prefixLen for ${ipBytes.length * 8}-bit address")
+        }
         (ipBytes, prefixLen)
       }.toOption
     }
@@ -209,14 +215,17 @@ object GcpIpRangeLookup {
 
   /**
    * Ensure the IP ranges are loaded at least once.
+   * Initialization is async to avoid blocking the request path.
    */
   def ensureInitialized(): Unit = {
     if (!isInitialized.get()) {
       synchronized {
         if (!isInitialized.get()) {
-          refresh()
-          // Touch the scheduler to start background refreshes
-          scheduler
+          // Mark as initialized immediately with empty trie to avoid blocking
+          // The background thread will populate it async
+          isInitialized.set(true)
+          // Start async refresh in background thread
+          scheduler.execute(() => refresh())
         }
       }
     }
