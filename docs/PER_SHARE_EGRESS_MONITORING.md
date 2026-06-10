@@ -125,6 +125,11 @@ accessLogging:
   detectGcpTraffic: true                # Enable GCP IP range lookup
   clientRegionHeader: "x-client-region" # Header with country code
   clientIpHeader: "x-forwarded-for"     # Header with client IP chain
+  # Optional: write ACCESS_LOG entries to a Delta table on GCS in addition to JSON logs.
+  # The table is auto-created on first write. Omit to disable.
+  deltaTablePath: "gs://<bucket>/datalake/data/tenant/_system/access_log_br__system"
+  deltaFlushIntervalSeconds: 60         # Max seconds between Delta flushes (default: 60)
+  deltaFlushBatchSize: 1000             # Records per flush before early trigger (default: 1000)
 ```
 
 ### GCP Load Balancer Headers
@@ -134,6 +139,45 @@ Configure custom request headers on your backend:
 X-Client-Region: {client_region}
 X-Client-Region-Subdivision: {client_region_subdivision}
 ```
+
+---
+
+## Delta Lake Storage
+
+When `deltaTablePath` is configured, `ACCESS_LOG` entries are written asynchronously to
+a Delta table on GCS in addition to the JSON log stream. This enables durable storage and
+SQL-queryable access via Delta Sharing.
+
+### Table Details
+
+| Property | Value |
+|----------|-------|
+| **Template** | `access_log_br` |
+| **Partitioning** | `year`, `month`, `day` (derived from `timestampMs`) |
+| **Format** | Parquet + Delta transaction log |
+| **Auto-create** | Table is initialized on first write if absent |
+
+### GCS Paths by Environment
+
+| Environment | Delta Table Path |
+|-------------|------------------|
+| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+
+### Delta Write Behavior
+
+- Records are buffered in a bounded in-memory queue (capacity: 100,000) and written by a
+  background daemon thread — the request path is never blocked.
+- A flush is triggered when `deltaFlushBatchSize` records accumulate or `deltaFlushIntervalSeconds`
+  elapses, whichever comes first.
+- Queue overflow silently drops records (logged as a warning); write errors are logged to stderr
+  and never propagate to clients.
+- On graceful shutdown the queue is fully drained before the process exits.
+- Only `ACCESS_LOG` entries are written to Delta. `PRICING_CONTEXT` and `REQUEST_HEADERS`
+  entries are log-only.
 
 ---
 
@@ -191,7 +235,8 @@ X-Client-Region-Subdivision: {client_region_subdivision}
 |------|---------|
 | `GcpPricingTier.scala` | Continent mapping, egress type detection, pricing calculation |
 | `GcpIpRangeLookup.scala` | GCP IP range fetching and CIDR trie lookup |
-| `AccessLogEmitter.scala` | Log entry models and JSON emission |
+| `AccessLogEmitter.scala` | Log entry models, JSON emission, composite fan-out |
+| `DeltaAccessLogWriter.scala` | Async Delta Lake writer (buffered queue, auto-create table) |
 | `DeltaSharingService.scala` | Integration for query/CDF endpoints |
 | `ServerConfig.scala` | `AccessLoggingConfig` model |
 
@@ -203,7 +248,8 @@ Sum of `size` from all file actions: `AddFile`, `AddFileForCDF`, `AddCDCFile`.
 
 ## Notes
 
-- Logs emitted to `delta.sharing.access` logger
-- Zero-byte requests not logged
+- JSON logs emitted to `delta.sharing.access` logger
+- Zero-byte requests not logged (neither to JSON nor Delta)
 - GCP IP ranges refreshed every 24 hours
 - Pricing tiers match GCP documentation
+- Delta writes are additive; disabling `deltaTablePath` has no effect on JSON log output

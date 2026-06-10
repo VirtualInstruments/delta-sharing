@@ -1220,6 +1220,12 @@ object DeltaSharingService {
   }
 
   def start(serverConfig: ServerConfig): Server = {
+    val service = new DeltaSharingService(serverConfig)
+    // scalastyle:off runtimeaddshutdownhook
+    Runtime.getRuntime.addShutdownHook(new Thread(
+      () => service.accessLogEmitter.close(),
+      "delta-access-log-shutdown"))
+    // scalastyle:on runtimeaddshutdownhook
     lazy val server = {
       updateDefaultJsonPrinterForScalaPbConverterUtil()
       val builder = Server.builder()
@@ -1227,7 +1233,7 @@ object DeltaSharingService {
         .disableDateHeader()
         .disableServerHeader()
         .requestTimeout(java.time.Duration.ofSeconds(serverConfig.requestTimeoutSeconds))
-        .annotatedService(serverConfig.endpoint, new DeltaSharingService(serverConfig): Any)
+        .annotatedService(serverConfig.endpoint, service: Any)
       if (serverConfig.ssl == null) {
         builder.http(serverConfig.getPort)
       } else {
