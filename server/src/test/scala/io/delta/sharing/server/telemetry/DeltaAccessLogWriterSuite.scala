@@ -151,7 +151,8 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   test("close flushes records that have not yet been written") {
     val basePath = makeTempPath()
     // Very long flush interval so nothing writes until close()
-    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 3600, flushBatchSize = 10000)
+    val writer =
+      new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 3600, flushBatchSize = 10000)
     writer.record(makeEntry())
     writer.record(makeEntry())
     writer.close() // should trigger final flush
