@@ -32,4 +32,4 @@ data:
       detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
-      deltaTablePath: "gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br__system"
+      deltaTablePath: "gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system"

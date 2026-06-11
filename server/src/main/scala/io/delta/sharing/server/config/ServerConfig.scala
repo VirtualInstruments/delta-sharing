@@ -153,10 +153,11 @@ case class AccessLoggingConfig(
     // When true, client IPs belonging to other GCP regions can be classified as inter-region
     // (cheaper) rather than internet egress. Set to false to disable this detection.
     @BeanProperty var detectGcpTraffic: Boolean,
-    // GCS path to a Delta table for durable access log storage. When set, ACCESS_LOG entries
-    // are written asynchronously to this Delta table in addition to the JSON log stream.
-    // Leave null or omit to disable Delta writing.
-    // Example: gs://my-bucket/datalake/data/tenant/_system/access_log_br__system
+    // GCS base path for per-tenant access log Delta tables. When set, ACCESS_LOG entries
+    // are written asynchronously to tenant-specific Delta tables in addition to JSON logs.
+    // Tables are named `access_log_{tenant_id}` where tenant_id is extracted from the
+    // share name (pattern: `{tenant_id}_share`). Leave null or omit to disable Delta writing.
+    // Example: gs://my-bucket/datalake/data/tenant/_system
     @BeanProperty var deltaTablePath: String,
     // How often (seconds) to flush buffered access log records to the Delta table.
     @BeanProperty var deltaFlushIntervalSeconds: Int,

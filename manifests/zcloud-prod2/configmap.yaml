@@ -27,4 +27,4 @@ data:
       detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
-      deltaTablePath: "gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br__system"
+      deltaTablePath: "gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system"

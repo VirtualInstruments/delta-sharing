@@ -39,22 +39,26 @@ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.{BINARY, INT64}
 import org.slf4j.LoggerFactory
 
 /**
- * Writes ACCESS_LOG entries asynchronously to a Delta table on GCS.
+ * Writes ACCESS_LOG entries asynchronously to per-tenant Delta tables on GCS.
  *
  * Records are buffered in a bounded in-memory queue and written by a single background
  * daemon thread. The calling thread is never blocked: records are silently dropped when
  * the queue is full. Write failures are logged to stderr and never propagate to callers.
  *
- * The Delta table is auto-created on the first write if it does not already exist.
+ * Access logs are split into per-tenant tables based on the share name. The tenant_id is
+ * extracted from share names following the pattern `{tenant_id}_share`. Each tenant gets
+ * its own table at `{basePath}/access_log_{tenant_id}`.
+ *
+ * The Delta tables are auto-created on the first write if they do not already exist.
  * Only ACCESS_LOG entries are written; PRICING_CONTEXT and REQUEST_HEADERS are ignored.
  *
- * @param tablePath GCS path to the Delta table
- *        (e.g. gs://bucket/datalake/data/tenant/_system/access_log_br__system)
+ * @param basePath GCS base path for tenant access log tables
+ *        (e.g. gs://bucket/datalake/data/tenant/_system)
  * @param flushIntervalSeconds how often to flush buffered records (seconds)
  * @param flushBatchSize maximum records per flush (triggers early flush when reached)
  */
 class DeltaAccessLogWriter(
-    tablePath: String,
+    basePath: String,
     flushIntervalSeconds: Int,
     flushBatchSize: Int) extends AccessLogEmitter {
 
@@ -174,7 +178,38 @@ class DeltaAccessLogWriter(
     }
   }
 
+  /**
+   * Extracts tenant_id from share name following the pattern `{tenant_id}_share`.
+   * Falls back to `_unknown` if the pattern doesn't match.
+   */
+  private def extractTenantId(shareName: String): String = {
+    if (shareName.endsWith("_share")) {
+      shareName.dropRight("_share".length)
+    } else {
+      // Fallback for shares not following the convention
+      shareName
+    }
+  }
+
+  /**
+   * Constructs the full table path for a given tenant_id.
+   */
+  private def tablePathForTenant(tenantId: String): String = {
+    val normalizedBase = if (basePath.endsWith("/")) basePath.dropRight(1) else basePath
+    s"$normalizedBase/access_log_$tenantId"
+  }
+
   private def writeBatch(entries: List[AccessLogEntry]): Unit = {
+    // Group by tenant_id first, then by date partition within each tenant
+    val groupedByTenant = entries.groupBy(e => extractTenantId(e.share))
+
+    for ((tenantId, tenantEntries) <- groupedByTenant) {
+      writeTenantBatch(tenantId, tenantEntries)
+    }
+  }
+
+  private def writeTenantBatch(tenantId: String, entries: List[AccessLogEntry]): Unit = {
+    val tablePath = tablePathForTenant(tenantId)
     val grouped = entries.groupBy { e =>
       val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
       cal.setTimeInMillis(e.timestampMs)
@@ -200,7 +235,7 @@ class DeltaAccessLogWriter(
 
     val addFiles: Seq[io.delta.standalone.actions.Action] =
       grouped.flatMap { case ((year, month, day), partEntries) =>
-        writeParquetPartition(year, month, day, partEntries)
+        writeParquetPartition(tablePath, year, month, day, partEntries)
       }.toSeq
 
     val allActions: Seq[io.delta.standalone.actions.Action] =
@@ -216,6 +251,7 @@ class DeltaAccessLogWriter(
   }
 
   private def writeParquetPartition(
+      tablePath: String,
       year: Int,
       month: Int,
       day: Int,

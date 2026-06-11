@@ -36,7 +36,7 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   private def makeEntry(
-      share: String = "s",
+      share: String = "tenant1_share",
       schema: String = "sc",
       table: String = "t",
       egressBytes: Long = 1024L,
@@ -47,13 +47,23 @@ class DeltaAccessLogWriterSuite extends FunSuite {
     AccessLogEntry(share, schema, table, egressBytes, timestampMs,
       pricingTier, clientRegion, requestType)
 
-  test("single record is written to Delta table and readable via DeltaLog") {
-    val path = makeTempPath()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+  /**
+   * Gets the tenant-specific table path from the base path and share name.
+   * Mirrors the logic in DeltaAccessLogWriter.
+   */
+  private def tablePathForShare(basePath: String, share: String): String = {
+    val tenantId = if (share.endsWith("_share")) share.dropRight("_share".length) else share
+    s"$basePath/access_log_$tenantId"
+  }
+
+  test("single record is written to per-tenant Delta table") {
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     writer.record(makeEntry())
     writer.close()
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     val snapshot = log.snapshot()
     assert(snapshot.getVersion >= 0, "Delta table should exist after write")
 
@@ -68,15 +78,16 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   test("records are partitioned by year/month/day derived from timestampMs") {
-    val path = makeTempPath()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     // Three entries spanning two different days
     writer.record(makeEntry(timestampMs = 1717502400000L)) // 2024-06-04
     writer.record(makeEntry(timestampMs = 1717502400000L)) // 2024-06-04
     writer.record(makeEntry(timestampMs = 1717588800000L)) // 2024-06-05
     writer.close()
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     val files = log.snapshot().getAllFiles.asScala.toList
     assert(files.size == 2, "Two partitions expected (one per day)")
 
@@ -85,16 +96,17 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   test("multiple flushes produce multiple Delta commits") {
-    val path = makeTempPath()
+    val basePath = makeTempPath()
     // batchSize=1 means each record triggers its own flush.
     // Use different-day timestamps so each record lands in a distinct partition file,
     // which lets us verify both records were written regardless of commit count.
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 300, flushBatchSize = 1)
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 300, flushBatchSize = 1)
     writer.record(makeEntry(table = "t1", timestampMs = 1717502400000L)) // 2024-06-04
     writer.record(makeEntry(table = "t2", timestampMs = 1717588800000L)) // 2024-06-05
     writer.close() // waits for all pending flushes
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     assert(log.snapshot().getVersion >= 0, "Table should exist after write")
     val files = log.snapshot().getAllFiles.asScala.toList
     assert(files.size == 2, "Both records should produce separate partition files")
@@ -103,21 +115,22 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   test("records with zero egressBytes are silently skipped") {
-    val path = makeTempPath()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     writer.record(makeEntry(egressBytes = 0L))
     writer.record(makeEntry(egressBytes = -1L))
     writer.close()
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     assert(log.snapshot().getVersion < 0 ||
       log.snapshot().getAllFiles.asScala.isEmpty,
       "No data files should exist when all records are skipped")
   }
 
   test("recordContext and recordHeaders are no-ops") {
-    val path = makeTempPath()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     // Should not throw or write anything
     writer.recordContext(PricingContextLogEntry("s", "t", 0L))
     writer.recordHeaders(RequestHeadersLogEntry("s", "t", 0L, Map.empty))
@@ -136,27 +149,29 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   test("close flushes records that have not yet been written") {
-    val path = makeTempPath()
+    val basePath = makeTempPath()
     // Very long flush interval so nothing writes until close()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 3600, flushBatchSize = 10000)
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 3600, flushBatchSize = 10000)
     writer.record(makeEntry())
     writer.record(makeEntry())
     writer.close() // should trigger final flush
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     val files = log.snapshot().getAllFiles.asScala
     assert(files.nonEmpty, "Records should be flushed on close()")
   }
 
   test("Parquet files contain the expected columns") {
-    val path = makeTempPath()
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     writer.record(makeEntry())
     writer.close()
 
-    val log = DeltaLog.forTable(new Configuration(), new Path(path))
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val log = DeltaLog.forTable(new Configuration(), new Path(tablePath))
     val addFile = log.snapshot().getAllFiles.asScala.head
-    val filePath = new Path(s"$path/${addFile.getPath}")
+    val filePath = new Path(s"$tablePath/${addFile.getPath}")
     val conf = new Configuration()
     val reader = ParquetFileReader.open(HadoopInputFile.fromPath(filePath, conf))
     try {
@@ -177,15 +192,16 @@ class DeltaAccessLogWriterSuite extends FunSuite {
   }
 
   test("table is auto-created on first write") {
-    val path = makeTempPath()
-    val deltaPath = new Path(path)
+    val basePath = makeTempPath()
+    val tablePath = tablePathForShare(basePath, "tenant1_share")
+    val deltaPath = new Path(tablePath)
     val conf = new Configuration()
 
     // Confirm table does not exist
     val logBefore = DeltaLog.forTable(conf, deltaPath)
     assert(logBefore.snapshot().getVersion < 0, "Table should not exist before first write")
 
-    val writer = new DeltaAccessLogWriter(path, flushIntervalSeconds = 5, flushBatchSize = 100)
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
     writer.record(makeEntry())
     writer.close()
 
@@ -193,5 +209,47 @@ class DeltaAccessLogWriterSuite extends FunSuite {
     assert(logAfter.snapshot().getVersion >= 0, "Table should exist after first write")
     val partCols = logAfter.snapshot().getMetadata.getPartitionColumns.asScala
     assert(partCols == Seq("year", "month", "day"))
+  }
+
+  test("records from different tenants are written to separate tables") {
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
+    writer.record(makeEntry(share = "tenant1_share"))
+    writer.record(makeEntry(share = "tenant2_share"))
+    writer.record(makeEntry(share = "_system_share"))
+    writer.close()
+
+    val conf = new Configuration()
+
+    // Check tenant1 table
+    val tenant1Path = tablePathForShare(basePath, "tenant1_share")
+    val log1 = DeltaLog.forTable(conf, new Path(tenant1Path))
+    assert(log1.snapshot().getVersion >= 0, "tenant1 table should exist")
+    assert(log1.snapshot().getAllFiles.asScala.nonEmpty, "tenant1 table should have data")
+
+    // Check tenant2 table
+    val tenant2Path = tablePathForShare(basePath, "tenant2_share")
+    val log2 = DeltaLog.forTable(conf, new Path(tenant2Path))
+    assert(log2.snapshot().getVersion >= 0, "tenant2 table should exist")
+    assert(log2.snapshot().getAllFiles.asScala.nonEmpty, "tenant2 table should have data")
+
+    // Check _system table
+    val systemPath = tablePathForShare(basePath, "_system_share")
+    val logSystem = DeltaLog.forTable(conf, new Path(systemPath))
+    assert(logSystem.snapshot().getVersion >= 0, "_system table should exist")
+    assert(logSystem.snapshot().getAllFiles.asScala.nonEmpty, "_system table should have data")
+  }
+
+  test("share names without _share suffix are handled gracefully") {
+    val basePath = makeTempPath()
+    val writer = new DeltaAccessLogWriter(basePath, flushIntervalSeconds = 5, flushBatchSize = 100)
+    writer.record(makeEntry(share = "legacy_share_name"))
+    writer.close()
+
+    // Should fall back to using the full share name as tenant_id
+    val tablePath = s"$basePath/access_log_legacy_share_name"
+    val conf = new Configuration()
+    val log = DeltaLog.forTable(conf, new Path(tablePath))
+    assert(log.snapshot().getVersion >= 0, "Table should exist for share without _share suffix")
   }
 }

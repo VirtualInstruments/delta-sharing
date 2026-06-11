@@ -125,9 +125,10 @@ accessLogging:
   detectGcpTraffic: true                # Enable GCP IP range lookup
   clientRegionHeader: "x-client-region" # Header with country code
   clientIpHeader: "x-forwarded-for"     # Header with client IP chain
-  # Optional: write ACCESS_LOG entries to a Delta table on GCS in addition to JSON logs.
-  # The table is auto-created on first write. Omit to disable.
-  deltaTablePath: "gs://<bucket>/datalake/data/tenant/_system/access_log_br__system"
+  # Base path for per-tenant access log Delta tables. Tables are named access_log_{tenant_id}
+  # where tenant_id is extracted from share names (pattern: {tenant_id}_share).
+  # Omit to disable Delta writing.
+  deltaTablePath: "gs://<bucket>/datalake/data/tenant/_system"
   deltaFlushIntervalSeconds: 60         # Max seconds between Delta flushes (default: 60)
   deltaFlushBatchSize: 1000             # Records per flush before early trigger (default: 1000)
 ```
@@ -145,27 +146,38 @@ X-Client-Region-Subdivision: {client_region_subdivision}
 ## Delta Lake Storage
 
 When `deltaTablePath` is configured, `ACCESS_LOG` entries are written asynchronously to
-a Delta table on GCS in addition to the JSON log stream. This enables durable storage and
+per-tenant Delta tables on GCS in addition to the JSON log stream. This enables durable storage and
 SQL-queryable access via Delta Sharing.
+
+### Per-Tenant Table Naming
+
+Access logs are split into per-tenant tables based on the share name. The tenant_id is extracted
+from share names following the pattern `{tenant_id}_share`.
+
+| Share accessed | Write to table | GCS path |
+|----------------|----------------|----------|
+| `_system_share` | `access_log__system` | `gs://.../tenant/_system/access_log__system` |
+| `ipa7l25ufagwjfmv_share` | `access_log_ipa7l25ufagwjfmv` | `gs://.../tenant/_system/access_log_ipa7l25ufagwjfmv` |
+| `hhgp5t6oz3nvczk7_share` | `access_log_hhgp5t6oz3nvczk7` | `gs://.../tenant/_system/access_log_hhgp5t6oz3nvczk7` |
 
 ### Table Details
 
 | Property | Value |
 |----------|-------|
-| **Template** | `access_log_br` |
+| **Naming** | `access_log_{tenant_id}` |
 | **Partitioning** | `year`, `month`, `day` (derived from `timestampMs`) |
 | **Format** | Parquet + Delta transaction log |
-| **Auto-create** | Table is initialized on first write if absent |
+| **Auto-create** | Tables are initialized on first write if absent |
 
-### GCS Paths by Environment
+### GCS Base Paths by Environment
 
-| Environment | Delta Table Path |
-|-------------|------------------|
-| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
-| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
-| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
-| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
-| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| Environment | Base Path |
+|-------------|-----------|
+| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system` |
+| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system` |
+| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system` |
+| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system` |
+| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system` |
 
 ### Delta Write Behavior
 
