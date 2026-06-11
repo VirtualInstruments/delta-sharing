@@ -23,6 +23,7 @@ import java.security.cert.X509Certificate
 import java.sql.Timestamp
 import javax.net.ssl._
 
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
 import com.linecorp.armeria.server.Server
@@ -34,12 +35,26 @@ import scalapb.json4s.JsonFormat
 import io.delta.sharing.server.DeltaSharingService.DELTA_SHARING_INCLUDE_END_STREAM_ACTION
 import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.common.actions.{ColumnMappingTableFeature, DeletionVectorDescriptor, DeletionVectorsTableFeature, DeltaAddFile, DeltaFormat, DeltaProtocol, DeltaSingleAction}
-import io.delta.sharing.server.config.ServerConfig
+import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model._
 import io.delta.sharing.server.protocol._
+import io.delta.sharing.server.telemetry.GcpIpRangeLookup
 
 // scalastyle:off maxLineLength
 class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
+
+  // Test IP ranges for deterministic GCP IP lookup tests
+  // Prevents live HTTP fetch to gstatic.com during tests
+  private val testGcpIpRangesJson =
+    """
+    {
+      "syncToken": "test",
+      "creationTime": "2026-06-01T00:00:00.000000",
+      "prefixes": [
+        {"ipv4Prefix": "34.100.0.0/16", "service": "Google Cloud", "scope": "us-central1"}
+      ]
+    }
+    """
 
   def shouldRunIntegrationTest: Boolean = {
     sys.env.get("AWS_ACCESS_KEY_ID").exists(_.length > 0) &&
@@ -230,6 +245,201 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     intercept[IllegalArgumentException] {
       DeltaSharingService.getCdfOptionsMap(Some("2"), Some("endV"), None, None)
     }.getMessage.contains("endingVersion is not a valid number")
+  }
+
+  test("extractEgressBytes") {
+    val actions: Seq[Object] = Seq(
+      AddFile(
+        url = "u1",
+        id = "1",
+        partitionValues = Map.empty,
+        size = 10L
+      ).wrap,
+      AddFileForCDF(
+        url = "u2",
+        id = "2",
+        partitionValues = Map.empty,
+        size = 15L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      AddCDCFile(
+        url = "u3",
+        id = "3",
+        partitionValues = Map.empty,
+        size = 20L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      RemoveFile(
+        url = "u4",
+        id = "4",
+        partitionValues = Map.empty,
+        size = 25L,
+        version = 1L,
+        timestamp = 1L
+      ).wrap,
+      QueryStatus(queryId = "q1").wrap
+    )
+
+    assert(DeltaSharingService.extractEgressBytes(actions) == 45L)
+  }
+
+  test("buildClientLocationContext uses configured geo headers and pricing map") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "us",
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("US"))
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext falls back to default headers for region") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "CF-IPCountry" -> "br",
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("BR"))
+    assert(ctx.pricingTier == "internet_to_latam")
+  }
+
+  test("buildClientLocationContext returns same_region for local traffic") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    // No region header, no X-Forwarded-For -> same_region
+    val ctx = DeltaSharingService.buildClientLocationContext(Map.empty[String, String], cfg)
+
+    assert(ctx.clientRegion.isEmpty)
+    assert(ctx.pricingTier == "same_region")
+  }
+
+  test("buildClientLocationContext uses IP from X-Forwarded-For for pricing tier") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map("X-Forwarded-For" -> "10.0.0.1, 217.9.4.27, 35.191.144.206"),
+      cfg)
+
+    assert(ctx.clientRegion.isEmpty)
+    // Public IP in chain -> internet traffic, but no region -> unknown destination
+    assert(ctx.pricingTier == "unknown")
+  }
+
+  test("buildClientLocationContext calculates internet tier for EU destination") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Appengine-Country" -> "de",
+        "X-Forwarded-For" -> "1.2.3.4"  // Public IP -> internet traffic
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("DE"))
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext calculates internet tier for DE destination") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "DE",
+        "X-Forwarded-For" -> "1.2.3.4"
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("DE"))
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext detects same_region for no external IP") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map.empty[String, String],
+      cfg)
+
+    assert(ctx.pricingTier == "same_region")
+  }
+
+  test("buildClientLocationContext calculates inter-region tier for ZZ region") {
+    // Load deterministic IP ranges to avoid live HTTP fetch
+    GcpIpRangeLookup.loadFromJson(testGcpIpRangesJson)
+
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setSourceRegion("us-central1")
+    cfg.setDetectGcpTraffic(true)
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "ZZ",
+        "X-Forwarded-For" -> "34.100.0.1"
+      ),
+      cfg)
+
+    assert(ctx.clientRegion.contains("ZZ"))
+    // With deterministic IP ranges, 34.100.0.1 maps to us-central1 (same as sourceRegion)
+    assert(ctx.pricingTier == "same_region")
+  }
+
+  test("buildClientLocationContext calculates internet tier without source region") {
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setDetectGcpTraffic(true)
+    // Note: sourceRegion is NOT set
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "DE",
+        "X-Forwarded-For" -> "1.2.3.4"
+      ),
+      cfg)
+
+    // Internet pricing doesn't require sourceRegion
+    assert(ctx.pricingTier == "internet_to_na_eu")
+  }
+
+  test("buildClientLocationContext returns interregion_unknown for GCP IP without source") {
+    // Load deterministic IP ranges to avoid live HTTP fetch
+    GcpIpRangeLookup.loadFromJson(testGcpIpRangesJson)
+
+    val cfg = new AccessLoggingConfig()
+    cfg.setEnabled(true)
+    cfg.setDetectGcpTraffic(true)
+    // Note: sourceRegion is NOT set
+
+    val ctx = DeltaSharingService.buildClientLocationContext(
+      Map(
+        "X-Client-Region" -> "ZZ",  // ZZ indicates internal GCP traffic
+        "X-Forwarded-For" -> "34.100.0.1"  // GCP public IP
+      ),
+      cfg)
+
+    // Inter-region detected (GCP IP + ZZ region), but no sourceRegion for exact tier
+    assert(ctx.pricingTier == "interregion_unknown")
   }
 
   integrationTest("401 Unauthorized Error: incorrect token") {

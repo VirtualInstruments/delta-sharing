@@ -17,9 +17,11 @@
 package io.delta.sharing.server
 
 import java.io.{ByteArrayOutputStream, File, FileNotFoundException}
+import java.net.InetAddress
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.AccessDeniedException
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import javax.annotation.Nullable
 
@@ -33,6 +35,7 @@ import com.linecorp.armeria.server.{Server, ServiceRequestContext}
 import com.linecorp.armeria.server.annotation.{ConsumesJson, Default, ExceptionHandler, ExceptionHandlerFunction, Get, Head, Param, Post, ProducesJson}
 import com.linecorp.armeria.server.auth.AuthService
 import io.delta.kernel.exceptions.{KernelException, TableNotFoundException}
+import io.delta.standalone.internal.{DeltaResponseSingleAction => StandaloneDeltaResponseSingleAction}
 import io.delta.standalone.internal.DeltaCDFErrors
 import io.delta.standalone.internal.DeltaCDFIllegalArgumentException
 import io.delta.standalone.internal.DeltaDataSource
@@ -43,9 +46,12 @@ import org.slf4j.LoggerFactory
 import scalapb.json4s.Printer
 
 import io.delta.sharing.server.common.JsonUtils
-import io.delta.sharing.server.config.ServerConfig
-import io.delta.sharing.server.model.{QueryStatus, SingleAction}
+import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
+import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
+import io.delta.sharing.server.telemetry.{
+  AccessLogEmitter, AccessLogEntry, GcpPricingTier, PricingContextLogEntry, RequestHeadersLogEntry
+}
 
 object ErrorCode {
   val UNSUPPORTED_OPERATION = "UNSUPPORTED_OPERATION"
@@ -189,6 +195,145 @@ class DeltaSharingService(serverConfig: ServerConfig) {
   private val deltaSharedTableLoader = new DeltaSharedTableLoader(serverConfig)
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
+  private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
+
+  private def extractRequestHeaders(req: HttpRequest): Map[String, String] = {
+    req.headers().names().asScala
+      .flatMap { name =>
+        Option(req.headers().get(name)).map { value =>
+          name.toString.toLowerCase(Locale.ROOT) -> value
+        }
+      }
+      .toMap
+  }
+
+  private def emitQueryEgressMetric(
+      req: HttpRequest,
+      share: String,
+      schema: String,
+      table: String,
+      actions: Seq[Object]): Unit = {
+    if (!Option(serverConfig.getAccessLogging).exists(_.enabled)) {
+      return
+    }
+
+    val bytes = DeltaSharingService.extractEgressBytes(actions)
+    if (bytes <= 0) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+    val headers = extractRequestHeaders(req)
+    val pricingCtx = DeltaSharingService.buildPricingContext(
+      headers,
+      serverConfig.getAccessLogging)
+
+    // Emit access log with essential fields
+    val entry = AccessLogEntry(
+      share = share,
+      schema = schema,
+      table = table,
+      egressBytes = bytes,
+      timestampMs = nowMs,
+      pricingTier = pricingCtx.location.pricingTier,
+      clientRegion = pricingCtx.location.clientRegion,
+      requestType = AccessLogEmitter.QueryRequestType
+    )
+    accessLogEmitter.record(entry)
+
+    // Emit context log with full details for verification
+    val contextEntry = PricingContextLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      clientIp = pricingCtx.clientIp,
+      clientIpSource = pricingCtx.clientIpSource,
+      rawRegionHeader = pricingCtx.rawRegionHeader,
+      regionHeaderSource = pricingCtx.regionHeaderSource,
+      hasEnvoyMetadata = pricingCtx.hasEnvoyMetadata,
+      isGcpIp = pricingCtx.isGcpIp,
+      egressType = pricingCtx.egressType,
+      sourceRegion = pricingCtx.sourceRegion,
+      sourceContinent = pricingCtx.sourceContinent,
+      destinationRegion = pricingCtx.destinationRegion,
+      destinationContinent = pricingCtx.destinationContinent,
+      pricingTier = pricingCtx.location.pricingTier
+    )
+    accessLogEmitter.recordContext(contextEntry)
+
+    // Emit all request headers for debugging pricing tier detection
+    val headersEntry = RequestHeadersLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      headers = headers
+    )
+    accessLogEmitter.recordHeaders(headersEntry)
+  }
+
+  private def emitCdfEgressMetric(
+      req: HttpRequest,
+      share: String,
+      schema: String,
+      table: String,
+      actions: Seq[Object]): Unit = {
+    if (!Option(serverConfig.getAccessLogging).exists(_.enabled)) {
+      return
+    }
+
+    val bytes = DeltaSharingService.extractEgressBytes(actions)
+    if (bytes <= 0) {
+      return
+    }
+
+    val nowMs = System.currentTimeMillis()
+    val headers = extractRequestHeaders(req)
+    val pricingCtx = DeltaSharingService.buildPricingContext(
+      headers,
+      serverConfig.getAccessLogging)
+
+    // Emit access log with essential fields
+    val entry = AccessLogEntry(
+      share = share,
+      schema = schema,
+      table = table,
+      egressBytes = bytes,
+      timestampMs = nowMs,
+      pricingTier = pricingCtx.location.pricingTier,
+      clientRegion = pricingCtx.location.clientRegion,
+      requestType = AccessLogEmitter.CdfStreamRequestType
+    )
+    accessLogEmitter.record(entry)
+
+    // Emit context log with full details for verification
+    val contextEntry = PricingContextLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      clientIp = pricingCtx.clientIp,
+      clientIpSource = pricingCtx.clientIpSource,
+      rawRegionHeader = pricingCtx.rawRegionHeader,
+      regionHeaderSource = pricingCtx.regionHeaderSource,
+      hasEnvoyMetadata = pricingCtx.hasEnvoyMetadata,
+      isGcpIp = pricingCtx.isGcpIp,
+      egressType = pricingCtx.egressType,
+      sourceRegion = pricingCtx.sourceRegion,
+      sourceContinent = pricingCtx.sourceContinent,
+      destinationRegion = pricingCtx.destinationRegion,
+      destinationContinent = pricingCtx.destinationContinent,
+      pricingTier = pricingCtx.location.pricingTier
+    )
+    accessLogEmitter.recordContext(contextEntry)
+
+    // Emit all request headers for debugging pricing tier detection
+    val headersEntry = RequestHeadersLogEntry(
+      share = share,
+      table = table,
+      timestampMs = nowMs,
+      headers = headers
+    )
+    accessLogEmitter.recordHeaders(headersEntry)
+  }
 
   private def logCdfRequestComplete(
       wallStartNs: Long,
@@ -475,6 +620,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
         )
       }
 
+      emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
+
       streamingOutput(Some(queryResult.version), queryResult.responseFormat, queryResult.actions)
     }
   }
@@ -625,6 +772,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
           s"You can only query table data since version ${tableConfig.startVersion}."
         )
       }
+
+      emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
       logTableQueryComplete(start, share, schema, table, queryResult)
       streamingOutput(
         Some(queryResult.version),
@@ -683,6 +832,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       deltaLogUpdateNs = updateNs,
       requestTimeoutSecondsForLogging = Some(serverConfig.requestTimeoutSeconds)
     )
+    emitCdfEgressMetric(req, share, schema, table, queryResult.actions)
     logCdfRequestComplete(start, share, schema, table, queryResult)
     streamingOutput(
       Some(queryResult.version),
@@ -730,6 +880,9 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
 
 object DeltaSharingService {
+  // TEMPORARY: Logger for debugging headers - remove after testing X-Client-Region
+  private val logger = LoggerFactory.getLogger("delta.sharing.headers.debug")
+
   val DELTA_TABLE_VERSION_HEADER = "Delta-Table-Version"
   val DELTA_TABLE_METADATA_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
   val DELTA_SHARING_CAPABILITIES_HEADER = "delta-sharing-capabilities"
@@ -738,6 +891,309 @@ object DeltaSharingService {
   val DELTA_SHARING_INCLUDE_END_STREAM_ACTION = "includeendstreamaction"
   val DELTA_SHARING_READER_FEATURES = "readerfeatures"
   val DELTA_SHARING_CAPABILITIES_DELIMITER = ";"
+  private val DefaultRegionHeaders = Seq(
+    "x-client-region",
+    "x-appengine-country",
+    "cf-ipcountry",
+    "cloudfront-viewer-country")
+  private val DefaultIpHeaders = Seq(
+    "x-forwarded-for",
+    "x-envoy-external-address")
+  private val DefaultPricingGroupsByRegion = Map(
+    "US" -> "na_eu",
+    "CA" -> "na_eu",
+    "MX" -> "na_eu",
+    "GB" -> "na_eu",
+    "IE" -> "na_eu",
+    "DE" -> "na_eu",
+    "FR" -> "na_eu",
+    "NL" -> "na_eu",
+    "BE" -> "na_eu",
+    "CH" -> "na_eu",
+    "AT" -> "na_eu",
+    "ES" -> "na_eu",
+    "PT" -> "na_eu",
+    "IT" -> "na_eu",
+    "SE" -> "na_eu",
+    "NO" -> "na_eu",
+    "DK" -> "na_eu",
+    "FI" -> "na_eu",
+    "PL" -> "na_eu",
+    "CZ" -> "na_eu",
+    "HU" -> "na_eu",
+    "RO" -> "na_eu",
+    "JP" -> "apac",
+    "KR" -> "apac",
+    "IN" -> "apac",
+    "SG" -> "apac",
+    "HK" -> "apac",
+    "TW" -> "apac",
+    "ID" -> "apac",
+    "MY" -> "apac",
+    "PH" -> "apac",
+    "TH" -> "apac",
+    "VN" -> "apac",
+    "AU" -> "apac",
+    "NZ" -> "apac",
+    "BR" -> "latam",
+    "AR" -> "latam",
+    "CL" -> "latam",
+    "CO" -> "latam",
+    "PE" -> "latam")
+
+  /**
+   * Simplified location context for egress pricing.
+   * @param clientRegion ISO country code (e.g., "US", "MT") from X-Client-Region header
+   * @param pricingTier GCP egress pricing tier (see GcpPricingTier for values)
+   */
+  private[server] case class ClientLocationContext(
+      clientRegion: Option[String],
+      pricingTier: String)
+
+  /**
+   * Full context for pricing tier calculation, used for debugging/verification.
+   */
+  private[server] case class PricingContext(
+      location: ClientLocationContext,
+      clientIp: Option[String],
+      clientIpSource: Option[String],
+      rawRegionHeader: Option[String],
+      regionHeaderSource: Option[String],
+      hasEnvoyMetadata: Boolean,
+      isGcpIp: Boolean,
+      egressType: String,
+      sourceRegion: Option[String],
+      sourceContinent: Option[String],
+      destinationRegion: Option[String],
+      destinationContinent: Option[String])
+
+  private[server] def extractEgressBytes(actions: Seq[Object]): Long = {
+    actions.map(extractActionBytes).sum
+  }
+
+  private[server] def buildClientLocationContext(
+      req: HttpRequest,
+      accessLoggingConfig: AccessLoggingConfig): ClientLocationContext = {
+    buildPricingContext(req, accessLoggingConfig).location
+  }
+
+  private[server] def buildPricingContext(
+      req: HttpRequest,
+      accessLoggingConfig: AccessLoggingConfig): PricingContext = {
+    val headerMap: Map[String, String] = req.headers().names().asScala
+      .flatMap { name =>
+        Option(req.headers().get(name)).map { value =>
+          name.toString.toLowerCase(Locale.ROOT) -> value
+        }
+      }
+      .toMap
+
+    buildPricingContext(headerMap, accessLoggingConfig)
+  }
+
+  private[server] def buildClientLocationContext(
+      requestHeaders: Map[String, String],
+      accessLoggingConfig: AccessLoggingConfig): ClientLocationContext = {
+    buildPricingContext(requestHeaders, accessLoggingConfig).location
+  }
+
+  private[server] def buildPricingContext(
+      requestHeaders: Map[String, String],
+      accessLoggingConfig: AccessLoggingConfig): PricingContext = {
+    val cfgOpt = Option(accessLoggingConfig)
+    val normalizedHeaders = requestHeaders.map { case (k, v) =>
+      k.toLowerCase(Locale.ROOT) -> v
+    }
+
+    // Extract client region from headers
+    val regionHeaders = getOrderedHeaders(
+      cfgOpt.flatMap(c => Option(c.getClientRegionHeader)),
+      DefaultRegionHeaders)
+    val ipHeaders = getOrderedHeaders(
+      cfgOpt.flatMap(c => Option(c.getClientIpHeader)),
+      DefaultIpHeaders)
+
+    val regionWithSource = getFirstLocation(regionHeaders, normalizedHeaders)
+    val ipWithSource = getFirstClientIp(ipHeaders, normalizedHeaders)
+
+    val region = regionWithSource.map(_._1)
+    val rawRegion = regionWithSource.map { case (normalized, header) =>
+      normalizedHeaders.getOrElse(header, normalized)
+    }
+    val regionSource = regionWithSource.map(_._2)
+    val clientIp = ipWithSource.map(_._1)
+    val clientIpSource = ipWithSource.map(_._2)
+
+    // Check if client IP is in GCP public ranges
+    val isGcpIp = clientIp.exists(GcpPricingTier.isGcpPublicIp)
+
+    // GCP Pricing Tier calculation
+    val sourceRegion = cfgOpt
+      .flatMap(c => Option(c.getSourceRegion))
+      .map(_.trim)
+      .filter(_.nonEmpty)
+
+    val detectGcpTraffic = cfgOpt
+      .map(c => c.getDetectGcpTraffic)
+      .getOrElse(true)
+
+    val envoyPeerMetadata = normalizedHeaders.get("x-envoy-peer-metadata")
+
+    val (egressType, destGcpRegion) = GcpPricingTier.determineEgressType(
+      clientIp,
+      envoyPeerMetadata,
+      region,
+      detectGcpTraffic,
+      sourceRegion)
+
+    // Calculate continents for context logging
+    val sourceContinent = sourceRegion.map(GcpPricingTier.continentFromGcpRegion)
+    val destContinent = destGcpRegion.map(GcpPricingTier.continentFromGcpRegion)
+      .orElse(region.map(GcpPricingTier.continentFromCountryCode))
+
+    // Calculate pricing tier:
+    // - For internet traffic: based on destination only (no sourceRegion needed)
+    // - For inter-region traffic: requires sourceRegion
+    // - For same_zone/same_region: tier is the egress type itself
+    val pricingTier = egressType match {
+      case GcpPricingTier.EgressType.INTERNET =>
+        GcpPricingTier.calculatePricingTier(
+          sourceRegion, destGcpRegion, region, egressType)
+      case GcpPricingTier.EgressType.SAME_ZONE |
+           GcpPricingTier.EgressType.SAME_REGION =>
+        egressType.toString
+      case GcpPricingTier.EgressType.INTER_REGION if sourceRegion.isDefined =>
+        GcpPricingTier.calculatePricingTier(
+          sourceRegion, destGcpRegion, region, egressType)
+      case GcpPricingTier.EgressType.INTER_REGION =>
+        // Inter-region detected but no source region configured - use placeholder
+        "interregion_unknown"
+      case _ =>
+        "unknown"
+    }
+
+    PricingContext(
+      location = ClientLocationContext(
+        clientRegion = region,
+        pricingTier = pricingTier),
+      clientIp = clientIp,
+      clientIpSource = clientIpSource,
+      rawRegionHeader = rawRegion,
+      regionHeaderSource = regionSource,
+      hasEnvoyMetadata = envoyPeerMetadata.isDefined,
+      isGcpIp = isGcpIp,
+      egressType = egressType.toString,
+      sourceRegion = sourceRegion,
+      sourceContinent = sourceContinent.map(_.toString),
+      destinationRegion = destGcpRegion,
+      destinationContinent = destContinent.map(_.toString))
+  }
+
+  private def getOrderedHeaders(
+      configuredHeader: Option[String],
+      defaultHeaders: Seq[String]): Seq[String] = {
+    (configuredHeader.toSeq ++ defaultHeaders)
+      .map(_.trim.toLowerCase(Locale.ROOT))
+      .filter(_.nonEmpty)
+      .distinct
+  }
+
+  private def getFirstLocation(
+      headers: Seq[String],
+      requestHeaders: Map[String, String]): Option[(String, String)] = {
+    headers.iterator
+      .flatMap { h =>
+        requestHeaders.get(h)
+          .map(v => normalizeLocationCode(v) -> h)
+      }
+      .find(_._1.nonEmpty)
+  }
+
+  private def getFirstClientIp(
+      headers: Seq[String],
+      requestHeaders: Map[String, String]): Option[(String, String)] = {
+    headers.iterator
+      .flatMap { h =>
+        requestHeaders.get(h)
+          .flatMap(v => extractClientIp(v).map(_ -> h))
+      }
+      .toSeq
+      .headOption
+  }
+
+  private def extractClientIp(value: String): Option[String] = {
+    val candidates = value.split(",").map(_.trim).filter(_.nonEmpty)
+    val valid = candidates.filter(isValidIp)
+    valid.find(isPublicIp).orElse(valid.headOption)
+  }
+
+  private def isValidIp(ip: String): Boolean = {
+    // Validate IP format without DNS resolution to avoid latency and security issues
+    val ipv4Pattern = """^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$""".r
+    val ipv6Pattern = """^([0-9a-fA-F:]+)$""".r
+
+    ip match {
+      case ipv4Pattern(a, b, c, d) =>
+        Seq(a, b, c, d).forall { octet =>
+          val n = octet.toInt
+          n >= 0 && n <= 255
+        }
+      case ipv6Pattern(_) =>
+        try {
+          // For IPv6, use InetAddress but only for format validation
+          // This won't trigger DNS since it matches the IPv6 pattern
+          InetAddress.getByName(ip)
+          true
+        } catch {
+          case _: Throwable => false
+        }
+      case _ => false
+    }
+  }
+
+  private def isPublicIp(ip: String): Boolean = {
+    try {
+      val inet = InetAddress.getByName(ip)
+      !inet.isAnyLocalAddress &&
+      !inet.isLoopbackAddress &&
+      !inet.isLinkLocalAddress &&
+      !inet.isSiteLocalAddress &&
+      !inet.isMulticastAddress
+    } catch {
+      case _: Throwable => false
+    }
+  }
+
+  private def normalizeLocationCode(value: String): String = {
+    value.trim.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9*]", "")
+  }
+
+  private def extractActionBytes(action: Object): Long = {
+    action match {
+      case singleAction: SingleAction =>
+        val raw = singleAction.unwrap
+        raw match {
+          case addFile: AddFile => addFile.size
+          case addFileForCDF: AddFileForCDF => addFileForCDF.size
+          case addCDCFile: AddCDCFile => addCDCFile.size
+          case _ => 0L
+        }
+      case deltaResponse: StandaloneDeltaResponseSingleAction =>
+        Option(deltaResponse.file)
+          .flatMap(f => Option(f.deltaSingleAction))
+          .map { deltaAction =>
+            if (deltaAction.add != null) {
+              deltaAction.add.size
+            } else if (deltaAction.cdc != null) {
+              deltaAction.cdc.size
+            } else {
+              0L
+            }
+          }
+          .getOrElse(0L)
+      case _ => 0L
+    }
+  }
 
   private val parser = {
     val parser = ArgumentParsers

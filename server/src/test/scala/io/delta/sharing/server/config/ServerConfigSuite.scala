@@ -20,6 +20,7 @@ import java.io.File
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 import java.util.Arrays
+import java.util.Collections
 
 import org.apache.commons.io.FileUtils
 import org.scalatest.FunSuite
@@ -98,10 +99,52 @@ class ServerConfigSuite extends FunSuite {
       serverConfig.setVersion(1)
       serverConfig.setShares(sharesInTemplate)
       serverConfig.setPort(8080)
+      val accessLogging = new AccessLoggingConfig()
+      accessLogging.setEnabled(false)
+      serverConfig.setAccessLogging(accessLogging)
       assert(loaded == serverConfig)
     } finally {
       tempFile.delete()
     }
+  }
+
+  test("access logging config") {
+    val serverConfig = new ServerConfig()
+    serverConfig.setVersion(1)
+    serverConfig.setShares(Arrays.asList(
+      ShareConfig("share1", Arrays.asList(
+        SchemaConfig("schema1", Arrays.asList(
+          TableConfig(
+            name = "table1",
+            location = "s3a://bucket/path",
+            id = null
+          )
+        ))
+      ))
+    ))
+    val accessLogging = new AccessLoggingConfig()
+    accessLogging.setEnabled(true)
+    accessLogging.setClientRegionHeader("x-client-region")
+    accessLogging.setClientIpHeader("x-forwarded-for")
+    accessLogging.setPricingGroups(Collections.singletonMap("US", "na-tier-1"))
+    serverConfig.setAccessLogging(accessLogging)
+    testConfig(
+      """version: 1
+        |shares:
+        |- name: share1
+        |  schemas:
+        |  - name: schema1
+        |    tables:
+        |    - name: table1
+        |      location: s3a://bucket/path
+        |accessLogging:
+        |  enabled: true
+        |  clientRegionHeader: x-client-region
+        |  clientIpHeader: x-forwarded-for
+        |  pricingGroups:
+        |    US: na-tier-1
+        |""".stripMargin,
+      serverConfig)
   }
 
   test("accept unknown fields") {
@@ -156,6 +199,12 @@ class ServerConfigSuite extends FunSuite {
     assertInvalidConfig("'bearerToken' in 'authorization' must be provided") {
       new Authorization().checkConfig()
     }
+  }
+
+  test("AccessLoggingConfig") {
+    val accessLogging = new AccessLoggingConfig()
+    accessLogging.setEnabled(true)
+    accessLogging.checkConfig()
   }
 
   test("SSLConfig") {

@@ -21,3 +21,9 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
+    accessLogging:
+      enabled: true
+      sourceRegion: "us-west4"
+      detectGcpTraffic: true
+      clientRegionHeader: "x-client-region"
+      clientIpHeader: "x-forwarded-for"

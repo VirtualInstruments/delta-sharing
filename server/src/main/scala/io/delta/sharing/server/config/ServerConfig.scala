@@ -67,7 +67,9 @@ case class ServerConfig(
     // The TTL of the refresh token generated in queryTable API (in milliseconds).
     @BeanProperty var refreshTokenTtlMs: Int,
     // Whether to emit performance/timing log lines for table queries and CDF requests.
-    @BeanProperty var perfLoggingEnabled: Boolean
+    @BeanProperty var perfLoggingEnabled: Boolean,
+    // Access logging configuration for tracking share data egress via structured logs.
+    @BeanProperty var accessLogging: AccessLoggingConfig
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -91,7 +93,8 @@ case class ServerConfig(
       queryTablePageSizeLimit = 10000,
       queryTablePageTokenTtlMs = 259200000, // 3 days
       refreshTokenTtlMs = 3600000, // 1 hour
-      perfLoggingEnabled = true
+      perfLoggingEnabled = true,
+      accessLogging = null
     )
   }
 
@@ -122,6 +125,47 @@ case class ServerConfig(
     if (ssl != null) {
       ssl.checkConfig()
     }
+    if (accessLogging != null) {
+      accessLogging.checkConfig()
+    }
+  }
+}
+
+/**
+ * Configuration for access logging to track share data egress.
+ * When enabled, structured JSON logs are emitted for each data access.
+ */
+case class AccessLoggingConfig(
+    @BeanProperty var enabled: Boolean,
+    // Header that contains the client region code (for example: US, DE).
+    @BeanProperty var clientRegionHeader: String,
+    // Header that contains client IP or forwarding chain (for example: X-Forwarded-For).
+    @BeanProperty var clientIpHeader: String,
+    // Optional mapping from region codes to pricing group labels.
+    // Keys should be uppercase location codes (for example: US, DE).
+    // A wildcard key "*" can be used as a catch-all default.
+    // NOTE: pricingGroups is reserved for future use and not currently applied.
+    @BeanProperty var pricingGroups: java.util.Map[String, String],
+    // The GCP region where this server runs (for example: us-central1).
+    // Used for pricing tier calculation based on source→destination pairs.
+    @BeanProperty var sourceRegion: String,
+    // Enable GCP traffic detection using GCP's published IP ranges (cloud.json).
+    // When true, client IPs belonging to other GCP regions can be classified as inter-region
+    // (cheaper) rather than internet egress. Set to false to disable this detection.
+    @BeanProperty var detectGcpTraffic: Boolean) extends ConfigItem {
+
+  def this() = {
+    this(
+      enabled = false,
+      clientRegionHeader = "x-client-region",
+      clientIpHeader = "x-forwarded-for",
+      pricingGroups = Collections.emptyMap(),
+      sourceRegion = "",
+      detectGcpTraffic = true)
+  }
+
+  override def checkConfig(): Unit = {
+    // No required fields to validate
   }
 }
 
@@ -238,7 +282,7 @@ case class TableConfig(
     @BeanProperty var location: String,
     @BeanProperty var id: String = "",
     @BeanProperty var historyShared: Boolean = false,
-    @BeanProperty var startVersion: Long = 0) extends ConfigItem {
+  @BeanProperty var startVersion: Long = 0) extends ConfigItem {
 
   def this() {
     this(null, null, null)

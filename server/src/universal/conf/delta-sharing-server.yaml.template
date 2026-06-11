@@ -65,3 +65,26 @@ queryTablePageSizeLimit: 10000
 queryTablePageTokenTtlMs: 259200000
 # The TTL of the refresh token generated in queryTable API (in milliseconds).
 refreshTokenTtlMs: 3600000
+# Whether to emit performance/timing log lines for table queries and CDF requests.
+perfLoggingEnabled: true
+# Optional share-attributed egress access logs emitted as structured JSON log lines.
+accessLogging:
+  enabled: false
+  # Name of the incoming header that carries client region code (for example: US, DE).
+  # In GCP, configure your load balancer backend custom request headers to inject this.
+  # Example: X-Client-Region:{client_region}
+  clientRegionHeader: "x-client-region"
+  # Name of the incoming header that carries client IP information.
+  # This is typically a forwarding chain header and does not require LB changes when already present.
+  clientIpHeader: "x-forwarded-for"
+  # Optional mapping from region codes to billing price groups.
+  # Use uppercase keys. A wildcard key "*" can be used as a catch-all.
+  # NOTE: pricingGroups is reserved for future use and not currently applied.
+  pricingGroups: {}
+  # GCP region where this server runs (for example: us-central1).
+  # Used to determine source→destination pairs for egress cost attribution.
+  sourceRegion: ""
+  # Enable GCP traffic detection using GCP's published IP ranges (cloud.json).
+  # When true, client IPs belonging to other GCP regions can be classified as inter-region
+  # (cheaper) rather than internet egress. Set to false to disable this detection.
+  detectGcpTraffic: true

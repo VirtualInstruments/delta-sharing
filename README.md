@@ -436,6 +436,38 @@ Download the pre-built package `delta-sharing-server-x.y.z.zip` from [GitHub Rel
 - Make changes to your yaml file. You may also need to update some server configs for special requirements.
 - To add Shared Data, add reference to Delta Lake tables you would like to share from this server in this config file.
 
+### Optional Share Egress Access Logging
+
+The server can emit share-attributed structured access log entries for each query and CDF request.
+
+Fields emitted in each log line:
+
+- `share`
+- `schema`
+- `table`
+- `requestType` (`query` or `cdf_stream`)
+- `egressBytes`
+- `pricingTier`
+- `timestampMs`
+- `clientRegion` (if available)
+
+To enable this feature, configure the `accessLogging` block in the server yaml.
+
+Example yaml:
+
+```yaml
+shares:
+- name: "share1"
+  schemas:
+  - name: "schema1"
+    tables:
+    - name: "table1"
+      location: "gs://my-bucket/my-table"
+
+accessLogging:
+  enabled: true
+```
+
 ## Config the server to access tables on cloud storage
 
 We support sharing Delta Lake tables on S3, Azure Blob Storage and Azure Data Lake Storage Gen2.

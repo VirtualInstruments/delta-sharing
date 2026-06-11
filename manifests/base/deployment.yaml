@@ -27,8 +27,8 @@ spec:
             - -c
             - |
               echo "Merging base config and shares config..."
-              # Replace bearer token placeholder in base config
-              sed "s/BEARER_TOKEN_PLACEHOLDER/${BEARER_TOKEN}/g" /base-config/base-config.yaml > /tmp/base.yaml
+              # Replace placeholders in base config
+              sed -e "s/BEARER_TOKEN_PLACEHOLDER/${BEARER_TOKEN}/g" -e "s/GCP_PROJECT_ID_PLACEHOLDER/${GCP_PROJECT_ID}/g" /base-config/base-config.yaml > /tmp/base.yaml
               # Merge base config with shares config
               yq eval-all 'select(fileIndex == 0) * select(fileIndex == 1)' /tmp/base.yaml /shares-config/shares-config.yaml > /shared-config/delta-sharing-server-config.yaml
               echo "Config merged successfully"
@@ -39,6 +39,12 @@ spec:
               secretKeyRef:
                 name: delta-sharing-auth
                 key: bearer-token
+          - name: GCP_PROJECT_ID
+            valueFrom:
+              configMapKeyRef:
+                name: project-common
+                key: PROJECT_ID
+                optional: true
           volumeMounts:
             - name: base-config
               mountPath: /base-config
@@ -54,6 +60,7 @@ spec:
               configMapKeyRef:
                 name: project-common
                 key: PROJECT_ID
+                optional: true
           - name: ZC_API_PROXY_DL_SHARING_BEARER
             valueFrom:
               secretKeyRef:
