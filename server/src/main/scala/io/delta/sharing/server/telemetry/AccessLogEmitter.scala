@@ -167,7 +167,7 @@ object AccessLogEmitter {
     cfg match {
       case Some(c) if c.enabled =>
         val jsonEmitter = new JsonAccessLogEmitter()
-        val deltaPath = Option(c.getDeltaTablePath).filter(_.nonEmpty)
+        val deltaPath = Option(c.getDeltaTablePath).map(_.trim).filter(_.nonEmpty)
         deltaPath match {
           case Some(path) =>
             val deltaWriter = new DeltaAccessLogWriter(

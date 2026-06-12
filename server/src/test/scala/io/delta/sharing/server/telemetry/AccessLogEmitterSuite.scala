@@ -114,7 +114,11 @@ class AccessLogEmitterSuite extends FunSuite {
     config.setAccessLogging(accessConfig)
 
     val emitter = AccessLogEmitter.create(config)
-    assert(emitter.isInstanceOf[CompositeAccessLogEmitter])
+    try {
+      assert(emitter.isInstanceOf[CompositeAccessLogEmitter])
+    } finally {
+      emitter.close()
+    }
   }
 
   test("CompositeAccessLogEmitter fans out record calls to all delegates") {

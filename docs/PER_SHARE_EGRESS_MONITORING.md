@@ -127,7 +127,7 @@ accessLogging:
   clientRegionHeader: "x-client-region" # Header with country code
   clientIpHeader: "x-forwarded-for"     # Header with client IP chain
   # Base path for the consolidated access log Delta table.
-  # All access logs are written to a single table: access_log_br_system
+  # All access logs are written to a single table: access_log_br__system
   # Omit to disable Delta writing.
   deltaTablePath: "gs://<bucket>/datalake/data/tenant/_system"
   deltaFlushIntervalSeconds: 60         # Max seconds between Delta flushes (default: 60)
@@ -156,8 +156,10 @@ All access logs are written to a single consolidated table `access_log_br__syste
 field is included in each record for filtering by tenant. This simplifies cross-tenant queries
 and consolidates all egress data in one location.
 
+**Note:** `access_log_br__system` has double underscore in it's name (one as a separator and one from _system tenant's name).
+
 **IMPORTANT:** The Delta table must be pre-created by the `deltalake-admin` tool during tenant
-onboarding. The Delta Sharing server does not auto-create the table schema.
+onboarding. The Delta Sharing server does not auto-create the table schema. 
 
 | Property | Value |
 |----------|-------|
@@ -203,7 +205,7 @@ onboarding. The Delta Sharing server does not auto-create the table schema.
   elapses, whichever comes first.
 - Queue overflow silently drops records (logged as a warning); write errors are logged to stderr
   and never propagate to clients.
-- On graceful shutdown the queue is fully drained before the process exits.
+- On graceful shutdown the writer makes a best-effort attempt to drain the queue (up to ~30s) before the process exits.
 - Only `ACCESS_LOG` entries are written to Delta. `PRICING_CONTEXT` and `REQUEST_HEADERS`
   entries are log-only.
 

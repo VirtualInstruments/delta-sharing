@@ -109,7 +109,7 @@ class DeltaAccessLogWriter(
       logger.warn(
         "Delta access log queue is full ({} capacity); " +
           "dropping record for tenant {} share {}/{}/{}",
-        MaxQueueCapacity: Integer,
+        MaxQueueCapacity.asInstanceOf[AnyRef],
         extractTenantId(entry.share),
         entry.share,
         entry.schema,
@@ -123,7 +123,12 @@ class DeltaAccessLogWriter(
 
   override def close(): Unit = {
     stopped.set(true)
-    flushThread.join(30000L)
+    try {
+      flushThread.join(30000L)
+    } catch {
+      case _: InterruptedException =>
+        Thread.currentThread().interrupt()
+    }
   }
 
   private def runFlushLoop(): Unit = {

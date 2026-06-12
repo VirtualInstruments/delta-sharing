@@ -16,7 +16,6 @@
 
 package io.delta.sharing.server.telemetry
 
-import java.io.File
 import java.nio.file.Files
 
 import scala.collection.JavaConverters._

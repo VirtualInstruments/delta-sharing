@@ -88,9 +88,9 @@ accessLogging:
   # When true, client IPs belonging to other GCP regions can be classified as inter-region
   # (cheaper) rather than internet egress. Set to false to disable this detection.
   detectGcpTraffic: true
-  # GCS base path for per-tenant access log Delta tables. When set, ACCESS_LOG entries are
-  # written asynchronously to tenant-specific tables (access_log_{tenant_id}) in addition to
-  # the JSON log stream. Tables are auto-created on the first write if absent.
+  # GCS base path for the consolidated access log Delta table. When set, ACCESS_LOG entries are
+  # written asynchronously to `{deltaTablePath}/access_log_br__system` in addition to the JSON log stream.
+  # The Delta table must be pre-created by deltalake-admin; the server does not auto-create it.
   # Omit or leave empty to disable Delta writing.
   # Example: gs://my-bucket/datalake/data/tenant/_system
   # deltaTablePath: ""
