@@ -207,6 +207,18 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       .toMap
   }
 
+  /**
+   * Extracts tenant_id from share name following the pattern `{tenant_id}_share`.
+   * Falls back to the share name itself if the pattern doesn't match.
+   */
+  private def extractTenantId(shareName: String): String = {
+    if (shareName.endsWith("_share")) {
+      shareName.dropRight("_share".length)
+    } else {
+      shareName
+    }
+  }
+
   private def emitQueryEgressMetric(
       req: HttpRequest,
       share: String,
@@ -228,7 +240,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       headers,
       serverConfig.getAccessLogging)
 
-    // Emit access log with essential fields
+    // Emit access log with essential fields and audit fields
     val entry = AccessLogEntry(
       share = share,
       schema = schema,
@@ -237,7 +249,11 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       timestampMs = nowMs,
       pricingTier = pricingCtx.location.pricingTier,
       clientRegion = pricingCtx.location.clientRegion,
-      requestType = AccessLogEmitter.QueryRequestType
+      requestType = AccessLogEmitter.QueryRequestType,
+      tenantId = Some(extractTenantId(share)),
+      clientIp = pricingCtx.clientIp,
+      rawRegionHeader = pricingCtx.rawRegionHeader,
+      isGcpIp = Some(pricingCtx.isGcpIp)
     )
     accessLogEmitter.record(entry)
 
@@ -292,7 +308,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       headers,
       serverConfig.getAccessLogging)
 
-    // Emit access log with essential fields
+    // Emit access log with essential fields and audit fields
     val entry = AccessLogEntry(
       share = share,
       schema = schema,
@@ -301,7 +317,11 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       timestampMs = nowMs,
       pricingTier = pricingCtx.location.pricingTier,
       clientRegion = pricingCtx.location.clientRegion,
-      requestType = AccessLogEmitter.CdfStreamRequestType
+      requestType = AccessLogEmitter.CdfStreamRequestType,
+      tenantId = Some(extractTenantId(share)),
+      clientIp = pricingCtx.clientIp,
+      rawRegionHeader = pricingCtx.rawRegionHeader,
+      isGcpIp = Some(pricingCtx.isGcpIp)
     )
     accessLogEmitter.record(entry)
 

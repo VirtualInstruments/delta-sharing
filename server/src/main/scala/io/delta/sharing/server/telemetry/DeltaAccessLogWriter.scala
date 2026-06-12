@@ -25,7 +25,7 @@ import scala.collection.JavaConverters._
 import io.delta.standalone.DeltaLog
 import io.delta.standalone.Operation
 import io.delta.standalone.actions.{AddFile, Format, Metadata, Protocol}
-import io.delta.standalone.types.{IntegerType, LongType, StringType, StructType}
+import io.delta.standalone.types.{BooleanType, LongType, StringType, StructType}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
@@ -35,24 +35,24 @@ import org.apache.parquet.hadoop.metadata.CompressionCodecName
 import org.apache.parquet.io.api.Binary
 import org.apache.parquet.schema.{MessageType, Types => PTypes}
 import org.apache.parquet.schema.LogicalTypeAnnotation
-import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.{BINARY, INT64}
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.{BINARY, BOOLEAN, INT64}
 import org.slf4j.LoggerFactory
 
 /**
- * Writes ACCESS_LOG entries asynchronously to per-tenant Delta tables on GCS.
+ * Writes ACCESS_LOG entries asynchronously to a single consolidated Delta table on GCS.
  *
  * Records are buffered in a bounded in-memory queue and written by a single background
  * daemon thread. The calling thread is never blocked: records are silently dropped when
  * the queue is full. Write failures are logged to stderr and never propagate to callers.
  *
- * Access logs are split into per-tenant tables based on the share name. The tenant_id is
- * extracted from share names following the pattern `{tenant_id}_share`. Each tenant gets
- * its own table at `{basePath}/access_log_{tenant_id}`.
+ * All access logs are written to a single table at `{basePath}/access_log_br_system`,
+ * with tenant_id included as a field for filtering. The table is not partitioned to
+ * simplify queries across all tenants.
  *
- * The Delta tables are auto-created on the first write if they do not already exist.
+ * The Delta table is auto-created on the first write if it does not already exist.
  * Only ACCESS_LOG entries are written; PRICING_CONTEXT and REQUEST_HEADERS are ignored.
  *
- * @param basePath GCS base path for tenant access log tables
+ * @param basePath GCS base path for the consolidated access log table
  *        (e.g. gs://bucket/datalake/data/tenant/_system)
  * @param flushIntervalSeconds how often to flush buffered records (seconds)
  * @param flushBatchSize maximum records per flush (triggers early flush when reached)
@@ -73,7 +73,7 @@ class DeltaAccessLogWriter(
   // GOOGLE_APPLICATION_CREDENTIALS, picked up automatically by the GCS Hadoop connector.
   private val conf = withClassLoader(new Configuration())
 
-  // Parquet schema: data columns stored in the file body (partition cols excluded).
+  // Parquet schema: all data columns including audit fields (no partitioning).
   private val parquetSchema: MessageType = new MessageType("access_log",
     PTypes.required(BINARY).as(LogicalTypeAnnotation.stringType()).named("logType"),
     PTypes.required(BINARY).as(LogicalTypeAnnotation.stringType()).named("share"),
@@ -83,10 +83,15 @@ class DeltaAccessLogWriter(
     PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("pricingTier"),
     PTypes.required(INT64).named("timestampMs"),
     PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("requestType"),
-    PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("clientRegion")
+    PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("clientRegion"),
+    // Audit fields for customer audits and consolidated storage
+    PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("tenantId"),
+    PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("clientIp"),
+    PTypes.optional(BINARY).as(LogicalTypeAnnotation.stringType()).named("rawRegionHeader"),
+    PTypes.optional(BOOLEAN).named("isGcpIp")
   )
 
-  // Delta schema: data columns + partition columns.
+  // Delta schema: all data columns (no partition columns).
   private val deltaSchema: StructType = new StructType()
     .add("logType", new StringType(), false)
     .add("share", new StringType(), false)
@@ -97,11 +102,13 @@ class DeltaAccessLogWriter(
     .add("timestampMs", new LongType(), false)
     .add("requestType", new StringType(), true)
     .add("clientRegion", new StringType(), true)
-    .add("year", new IntegerType(), false)
-    .add("month", new IntegerType(), false)
-    .add("day", new IntegerType(), false)
+    // Audit fields for customer audits and consolidated storage
+    .add("tenantId", new StringType(), true)
+    .add("clientIp", new StringType(), true)
+    .add("rawRegionHeader", new StringType(), true)
+    .add("isGcpIp", new BooleanType(), true)
 
-  private val partitionCols: java.util.List[String] = List("year", "month", "day").asJava
+  private val partitionCols: java.util.List[String] = java.util.Collections.emptyList()
 
   // How often the flush loop wakes to check the stopped flag and time-based flush.
   // Short enough for responsive shutdown; long enough to avoid busy-waiting.
@@ -180,7 +187,7 @@ class DeltaAccessLogWriter(
 
   /**
    * Extracts tenant_id from share name following the pattern `{tenant_id}_share`.
-   * Falls back to `_unknown` if the pattern doesn't match.
+   * Falls back to the share name itself if the pattern doesn't match.
    */
   private def extractTenantId(shareName: String): String = {
     if (shareName.endsWith("_share")) {
@@ -192,31 +199,16 @@ class DeltaAccessLogWriter(
   }
 
   /**
-   * Constructs the full table path for a given tenant_id.
+   * Returns the path to the consolidated access log table.
    */
-  private def tablePathForTenant(tenantId: String): String = {
+  private def consolidatedTablePath: String = {
     val normalizedBase = if (basePath.endsWith("/")) basePath.dropRight(1) else basePath
-    s"$normalizedBase/access_log_$tenantId"
+    s"$normalizedBase/access_log_br_system"
   }
 
   private def writeBatch(entries: List[AccessLogEntry]): Unit = {
-    // Group by tenant_id first, then by date partition within each tenant
-    val groupedByTenant = entries.groupBy(e => extractTenantId(e.share))
-
-    for ((tenantId, tenantEntries) <- groupedByTenant) {
-      writeTenantBatch(tenantId, tenantEntries)
-    }
-  }
-
-  private def writeTenantBatch(tenantId: String, entries: List[AccessLogEntry]): Unit = {
-    val tablePath = tablePathForTenant(tenantId)
-    val grouped = entries.groupBy { e =>
-      val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
-      cal.setTimeInMillis(e.timestampMs)
-      (cal.get(java.util.Calendar.YEAR),
-        cal.get(java.util.Calendar.MONTH) + 1,
-        cal.get(java.util.Calendar.DAY_OF_MONTH))
-    }
+    // Write all entries to the single consolidated table
+    val tablePath = consolidatedTablePath
 
     val deltaLog = DeltaLog.forTable(conf, new Path(tablePath))
     val txn = deltaLog.startTransaction()
@@ -233,30 +225,38 @@ class DeltaAccessLogWriter(
       txn.updateMetadata(metadata)
     }
 
-    val addFiles: Seq[io.delta.standalone.actions.Action] =
-      grouped.flatMap { case ((year, month, day), partEntries) =>
-        writeParquetPartition(tablePath, year, month, day, partEntries)
-      }.toSeq
-
-    val allActions: Seq[io.delta.standalone.actions.Action] =
-      if (isNewTable) new Protocol(1, 2) +: addFiles else addFiles
-
-    val operation = if (isNewTable) {
-      new Operation(Operation.Name.CREATE_TABLE)
-    } else {
-      new Operation(Operation.Name.WRITE)
+    // Enrich entries with tenantId if not already set
+    val enrichedEntries = entries.map { e =>
+      if (e.tenantId.isEmpty) {
+        e.copy(tenantId = Some(extractTenantId(e.share)))
+      } else {
+        e
+      }
     }
 
-    txn.commit(allActions.asJava, operation, "delta-sharing-server")
+    val addFile: Option[io.delta.standalone.actions.Action] =
+      writeParquetFile(tablePath, enrichedEntries)
+
+    val addFiles: Seq[io.delta.standalone.actions.Action] = addFile.toSeq
+
+    if (addFiles.nonEmpty) {
+      val allActions: Seq[io.delta.standalone.actions.Action] =
+        if (isNewTable) new Protocol(1, 2) +: addFiles else addFiles
+
+      val operation = if (isNewTable) {
+        new Operation(Operation.Name.CREATE_TABLE)
+      } else {
+        new Operation(Operation.Name.WRITE)
+      }
+
+      txn.commit(allActions.asJava, operation, "delta-sharing-server")
+    }
   }
 
-  private def writeParquetPartition(
+  private def writeParquetFile(
       tablePath: String,
-      year: Int,
-      month: Int,
-      day: Int,
       entries: List[AccessLogEntry]): Option[io.delta.standalone.actions.Action] = {
-    val relPath = s"year=$year/month=$month/day=$day/${UUID.randomUUID()}.parquet"
+    val relPath = s"${UUID.randomUUID()}.parquet"
     val absPath = new Path(s"$tablePath/$relPath")
     try {
       val factory = new SimpleGroupFactory(parquetSchema)
@@ -279,6 +279,11 @@ class DeltaAccessLogWriter(
           g.add("timestampMs", e.timestampMs)
           g.add("requestType", Binary.fromString(e.requestType))
           e.clientRegion.foreach(r => g.add("clientRegion", Binary.fromString(r)))
+          // Audit fields
+          e.tenantId.foreach(t => g.add("tenantId", Binary.fromString(t)))
+          e.clientIp.foreach(ip => g.add("clientIp", Binary.fromString(ip)))
+          e.rawRegionHeader.foreach(h => g.add("rawRegionHeader", Binary.fromString(h)))
+          e.isGcpIp.foreach(b => g.add("isGcpIp", b))
           writer.write(g)
         }
       } finally {
@@ -287,15 +292,12 @@ class DeltaAccessLogWriter(
 
       val fs = absPath.getFileSystem(conf)
       val fileSize = fs.getFileStatus(absPath).getLen
-      val partVals = Map(
-        "year" -> year.toString,
-        "month" -> month.toString,
-        "day" -> day.toString)
-      Some(AddFile.builder(relPath, partVals.asJava, fileSize, System.currentTimeMillis(), true)
-        .build())
+      // No partition values - empty map
+      Some(AddFile.builder(relPath, java.util.Collections.emptyMap[String, String](),
+        fileSize, System.currentTimeMillis(), true).build())
     } catch {
       case e: Exception =>
-        logger.error(s"Failed to write parquet file for year=$year/month=$month/day=$day", e)
+        logger.error(s"Failed to write parquet file $relPath", e)
         None
     }
   }

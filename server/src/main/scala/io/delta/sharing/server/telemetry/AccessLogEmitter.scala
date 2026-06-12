@@ -62,6 +62,12 @@ import io.delta.sharing.server.config.ServerConfig
  * == Optional Context ==
  * @param clientRegion ISO 3166-1 alpha-2 country code of the client (e.g., "US", "MT")
  * @param requestType Type of request: "query" (snapshot read) or "cdf_stream" (CDF streaming)
+ *
+ * == Audit Fields (for customer audits and consolidated storage) ==
+ * @param tenantId Tenant identifier extracted from share name (for consolidated table storage)
+ * @param clientIp Client IP address from request headers (for audit)
+ * @param rawRegionHeader Raw region header value before normalization (for audit)
+ * @param isGcpIp Whether the client IP is in a known GCP public IP range (for audit)
  */
 case class AccessLogEntry(
     share: String,
@@ -71,7 +77,11 @@ case class AccessLogEntry(
     timestampMs: Long,
     pricingTier: String = "unknown",
     clientRegion: Option[String] = None,
-    requestType: String = "query")
+    requestType: String = "query",
+    tenantId: Option[String] = None,
+    clientIp: Option[String] = None,
+    rawRegionHeader: Option[String] = None,
+    isGcpIp: Option[Boolean] = None)
 
 /**
  * Captures all context information used to calculate the pricing tier.
@@ -221,9 +231,13 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
       "requestType" -> entry.requestType
     )
 
-    // Optional context fields
+    // Optional context fields (including audit fields)
     val contextPayload = Seq(
-      entry.clientRegion.map("clientRegion" -> _)
+      entry.clientRegion.map("clientRegion" -> _),
+      entry.tenantId.map("tenantId" -> _),
+      entry.clientIp.map("clientIp" -> _),
+      entry.rawRegionHeader.map("rawRegionHeader" -> _),
+      entry.isGcpIp.map("isGcpIp" -> _)
     ).flatten.toMap
 
     val logPayload = basePayload ++ contextPayload
