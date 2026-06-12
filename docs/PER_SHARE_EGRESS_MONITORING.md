@@ -152,17 +152,20 @@ SQL-queryable access via Delta Sharing.
 
 ### Consolidated Table
 
-All access logs are written to a single consolidated table `access_log_br_system`. The `tenantId`
+All access logs are written to a single consolidated table `access_log_br__system`. The `tenantId`
 field is included in each record for filtering by tenant. This simplifies cross-tenant queries
 and consolidates all egress data in one location.
 
+**IMPORTANT:** The Delta table must be pre-created by the `deltalake-admin` tool during tenant
+onboarding. The Delta Sharing server does not auto-create the table schema.
+
 | Property | Value |
 |----------|-------|
-| **Table Name** | `access_log_br_system` |
-| **GCS Path** | `{deltaTablePath}/access_log_br_system` |
+| **Table Name** | `access_log_br__system` |
+| **GCS Path** | `{deltaTablePath}/access_log_br__system` |
 | **Partitioning** | None (unpartitioned for simplified queries) |
 | **Format** | Parquet + Delta transaction log |
-| **Auto-create** | Table is initialized on first write if absent |
+| **Pre-requisite** | Table must be created by `deltalake-admin` before first write |
 
 ### Schema
 
@@ -186,11 +189,11 @@ and consolidates all egress data in one location.
 
 | Environment | Table Path |
 |-------------|------------|
-| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br_system` |
-| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system/access_log_br_system` |
-| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system/access_log_br_system` |
-| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br_system` |
-| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system/access_log_br_system` |
+| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
 
 ### Delta Write Behavior
 
@@ -265,7 +268,7 @@ and consolidates all egress data in one location.
 | `GcpPricingTier.scala` | Continent mapping, egress type detection, pricing calculation |
 | `GcpIpRangeLookup.scala` | GCP IP range fetching and CIDR trie lookup |
 | `AccessLogEmitter.scala` | Log entry models with audit fields, JSON emission, composite fan-out |
-| `DeltaAccessLogWriter.scala` | Async Delta Lake writer to consolidated `access_log_br_system` table |
+| `DeltaAccessLogWriter.scala` | Async Delta Lake writer to consolidated `access_log_br__system` table |
 | `DeltaSharingService.scala` | Integration for query/CDF endpoints, tenant ID extraction |
 | `ServerConfig.scala` | `AccessLoggingConfig` model |
 
@@ -282,5 +285,5 @@ Sum of `size` from all file actions: `AddFile`, `AddFileForCDF`, `AddCDCFile`.
 - GCP IP ranges refreshed every 24 hours
 - Pricing tiers match GCP documentation
 - Delta writes are additive; disabling `deltaTablePath` has no effect on JSON log output
-- All tenant access logs are consolidated in a single `access_log_br_system` table
+- All tenant access logs are consolidated in a single `access_log_br__system` table
 - Audit fields (clientIp, rawRegionHeader, isGcpIp, tenantId) support customer audit requirements

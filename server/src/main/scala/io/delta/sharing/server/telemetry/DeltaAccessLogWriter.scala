@@ -24,8 +24,7 @@ import scala.collection.JavaConverters._
 
 import io.delta.standalone.DeltaLog
 import io.delta.standalone.Operation
-import io.delta.standalone.actions.{AddFile, Format, Metadata, Protocol}
-import io.delta.standalone.types.{BooleanType, LongType, StringType, StructType}
+import io.delta.standalone.actions.AddFile
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.example.data.simple.SimpleGroupFactory
@@ -45,11 +44,13 @@ import org.slf4j.LoggerFactory
  * daemon thread. The calling thread is never blocked: records are silently dropped when
  * the queue is full. Write failures are logged to stderr and never propagate to callers.
  *
- * All access logs are written to a single table at `{basePath}/access_log_br_system`,
+ * All access logs are written to a single table at `{basePath}/access_log_br__system`,
  * with tenant_id included as a field for filtering. The table is not partitioned to
  * simplify queries across all tenants.
  *
- * The Delta table is auto-created on the first write if it does not already exist.
+ * IMPORTANT: The Delta table must be pre-created by the deltalake-admin tool during
+ * tenant onboarding. This writer does not create the table schema.
+ *
  * Only ACCESS_LOG entries are written; PRICING_CONTEXT and REQUEST_HEADERS are ignored.
  *
  * @param basePath GCS base path for the consolidated access log table
@@ -91,25 +92,6 @@ class DeltaAccessLogWriter(
     PTypes.optional(BOOLEAN).named("isGcpIp")
   )
 
-  // Delta schema: all data columns (no partition columns).
-  private val deltaSchema: StructType = new StructType()
-    .add("logType", new StringType(), false)
-    .add("share", new StringType(), false)
-    .add("schema", new StringType(), false)
-    .add("table", new StringType(), false)
-    .add("egressBytes", new LongType(), false)
-    .add("pricingTier", new StringType(), true)
-    .add("timestampMs", new LongType(), false)
-    .add("requestType", new StringType(), true)
-    .add("clientRegion", new StringType(), true)
-    // Audit fields for customer audits and consolidated storage
-    .add("tenantId", new StringType(), true)
-    .add("clientIp", new StringType(), true)
-    .add("rawRegionHeader", new StringType(), true)
-    .add("isGcpIp", new BooleanType(), true)
-
-  private val partitionCols: java.util.List[String] = java.util.Collections.emptyList()
-
   // How often the flush loop wakes to check the stopped flag and time-based flush.
   // Short enough for responsive shutdown; long enough to avoid busy-waiting.
   private val CheckIntervalMs = 500L
@@ -125,8 +107,10 @@ class DeltaAccessLogWriter(
     if (entry.egressBytes <= 0) return
     if (!queue.offer(entry)) {
       logger.warn(
-        "Delta access log queue is full ({} capacity); dropping record for {}/{}/{}",
+        "Delta access log queue is full ({} capacity); " +
+          "dropping record for tenant {} share {}/{}/{}",
         MaxQueueCapacity: Integer,
+        extractTenantId(entry.share),
         entry.share,
         entry.schema,
         entry.table
@@ -170,9 +154,12 @@ class DeltaAccessLogWriter(
     }
 
     // Final flush: drain any remaining records before shutdown.
+    // Respect batch size to maintain consistent behavior (important for tests and
+    // scenarios where each record should produce a separate file).
     queue.drainTo(batch)
     if (!batch.isEmpty) {
-      safeWriteBatch(batch.asScala.toList)
+      val entries = batch.asScala.toList
+      entries.grouped(flushBatchSize).foreach(safeWriteBatch)
     }
   }
 
@@ -200,10 +187,11 @@ class DeltaAccessLogWriter(
 
   /**
    * Returns the path to the consolidated access log table.
+   * Table is named access_log_br__system (double underscore because _system tenant starts with _)
    */
   private def consolidatedTablePath: String = {
     val normalizedBase = if (basePath.endsWith("/")) basePath.dropRight(1) else basePath
-    s"$normalizedBase/access_log_br_system"
+    s"$normalizedBase/access_log_br__system"
   }
 
   private def writeBatch(entries: List[AccessLogEntry]): Unit = {
@@ -212,17 +200,13 @@ class DeltaAccessLogWriter(
 
     val deltaLog = DeltaLog.forTable(conf, new Path(tablePath))
     val txn = deltaLog.startTransaction()
-    val isNewTable = txn.readVersion() < 0
 
-    if (isNewTable) {
-      val metadata = Metadata.builder()
-        .schema(deltaSchema)
-        .format(new Format())
-        .partitionColumns(partitionCols)
-        .configuration(java.util.Collections.emptyMap[String, String]())
-        .createdTime(System.currentTimeMillis())
-        .build()
-      txn.updateMetadata(metadata)
+    // Table must be pre-created by deltalake-admin tool
+    if (txn.readVersion() < 0) {
+      logger.error(
+        s"Delta table does not exist at $tablePath. " +
+        "Table must be created by deltalake-admin during tenant onboarding.")
+      return
     }
 
     // Enrich entries with tenantId if not already set
@@ -240,16 +224,8 @@ class DeltaAccessLogWriter(
     val addFiles: Seq[io.delta.standalone.actions.Action] = addFile.toSeq
 
     if (addFiles.nonEmpty) {
-      val allActions: Seq[io.delta.standalone.actions.Action] =
-        if (isNewTable) new Protocol(1, 2) +: addFiles else addFiles
-
-      val operation = if (isNewTable) {
-        new Operation(Operation.Name.CREATE_TABLE)
-      } else {
-        new Operation(Operation.Name.WRITE)
-      }
-
-      txn.commit(allActions.asJava, operation, "delta-sharing-server")
+      val operation = new Operation(Operation.Name.WRITE)
+      txn.commit(addFiles.asJava, operation, "delta-sharing-server")
     }
   }
 
