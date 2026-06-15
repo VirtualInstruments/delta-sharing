@@ -1,5 +1,5 @@
 /*
- * Copyright (2021) The Delta Lake Project Authors.
+ * Copyright (2026) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -104,6 +104,46 @@ class AccessLogEmitterSuite extends FunSuite {
 
     val emitter = AccessLogEmitter.create(config)
     assert(emitter.isInstanceOf[JsonAccessLogEmitter])
+  }
+
+  test("AccessLogEmitter.create returns CompositeAccessLogEmitter when deltaTablePath is set") {
+    val config = new ServerConfig()
+    val accessConfig = new AccessLoggingConfig()
+    accessConfig.setEnabled(true)
+    accessConfig.setDeltaTablePath("/tmp/test-delta-table")
+    config.setAccessLogging(accessConfig)
+
+    val emitter = AccessLogEmitter.create(config)
+    try {
+      assert(emitter.isInstanceOf[CompositeAccessLogEmitter])
+    } finally {
+      emitter.close()
+    }
+  }
+
+  test("CompositeAccessLogEmitter fans out record calls to all delegates") {
+    var count = 0
+    val counting = new AccessLogEmitter {
+      override def record(entry: AccessLogEntry): Unit = count += 1
+      override def recordContext(entry: PricingContextLogEntry): Unit = {}
+      override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {}
+    }
+    val composite = new CompositeAccessLogEmitter(Seq(counting, counting))
+    composite.record(AccessLogEntry("s", "sc", "t", 100L, 0L))
+    assert(count == 2)
+  }
+
+  test("CompositeAccessLogEmitter close() calls close on all delegates") {
+    var closedCount = 0
+    val closeable = new AccessLogEmitter {
+      override def record(entry: AccessLogEntry): Unit = {}
+      override def recordContext(entry: PricingContextLogEntry): Unit = {}
+      override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {}
+      override def close(): Unit = closedCount += 1
+    }
+    val composite = new CompositeAccessLogEmitter(Seq(closeable, closeable))
+    composite.close()
+    assert(closedCount == 2)
   }
 
   test("request type constants are defined") {

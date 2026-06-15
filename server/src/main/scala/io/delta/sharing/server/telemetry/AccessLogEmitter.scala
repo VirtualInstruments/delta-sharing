@@ -1,5 +1,5 @@
 /*
- * Copyright (2021) The Delta Lake Project Authors.
+ * Copyright (2026) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -62,6 +62,12 @@ import io.delta.sharing.server.config.ServerConfig
  * == Optional Context ==
  * @param clientRegion ISO 3166-1 alpha-2 country code of the client (e.g., "US", "MT")
  * @param requestType Type of request: "query" (snapshot read) or "cdf_stream" (CDF streaming)
+ *
+ * == Audit Fields (for customer audits and consolidated storage) ==
+ * @param tenantId Tenant identifier extracted from share name (for consolidated table storage)
+ * @param clientIp Client IP address from request headers (for audit)
+ * @param rawRegionHeader Raw region header value before normalization (for audit)
+ * @param isGcpIp Whether the client IP is in a known GCP public IP range (for audit)
  */
 case class AccessLogEntry(
     share: String,
@@ -71,7 +77,11 @@ case class AccessLogEntry(
     timestampMs: Long,
     pricingTier: String = "unknown",
     clientRegion: Option[String] = None,
-    requestType: String = "query")
+    requestType: String = "query",
+    tenantId: Option[String] = None,
+    clientIp: Option[String] = None,
+    rawRegionHeader: Option[String] = None,
+    isGcpIp: Option[Boolean] = None)
 
 /**
  * Captures all context information used to calculate the pricing tier.
@@ -139,6 +149,7 @@ trait AccessLogEmitter {
   def record(entry: AccessLogEntry): Unit
   def recordContext(entry: PricingContextLogEntry): Unit
   def recordHeaders(entry: RequestHeadersLogEntry): Unit
+  def close(): Unit = {}
 }
 
 object AccessLogEmitter {
@@ -148,11 +159,24 @@ object AccessLogEmitter {
   /**
    * Creates an AccessLogEmitter based on server configuration.
    * Returns a JsonAccessLogEmitter if access logging is enabled, otherwise a no-op emitter.
+   * When deltaTablePath is also set, returns a CompositeAccessLogEmitter that fans out to
+   * both the JSON log stream and the Delta table writer.
    */
   def create(serverConfig: ServerConfig): AccessLogEmitter = {
     val cfg = Option(serverConfig.getAccessLogging)
     cfg match {
-      case Some(c) if c.enabled => new JsonAccessLogEmitter()
+      case Some(c) if c.enabled =>
+        val jsonEmitter = new JsonAccessLogEmitter()
+        val deltaPath = Option(c.getDeltaTablePath).map(_.trim).filter(_.nonEmpty)
+        deltaPath match {
+          case Some(path) =>
+            val deltaWriter = new DeltaAccessLogWriter(
+              path,
+              c.getDeltaFlushIntervalSeconds,
+              c.getDeltaFlushBatchSize)
+            new CompositeAccessLogEmitter(Seq(jsonEmitter, deltaWriter))
+          case None => jsonEmitter
+        }
       case _ => NoopAccessLogEmitter
     }
   }
@@ -165,6 +189,21 @@ object NoopAccessLogEmitter extends AccessLogEmitter {
   override def record(entry: AccessLogEntry): Unit = {}
   override def recordContext(entry: PricingContextLogEntry): Unit = {}
   override def recordHeaders(entry: RequestHeadersLogEntry): Unit = {}
+}
+
+/**
+ * Fans out all emitter calls to a sequence of delegate emitters.
+ * Used to write to both JSON logs and the Delta table simultaneously.
+ */
+class CompositeAccessLogEmitter(emitters: Seq[AccessLogEmitter]) extends AccessLogEmitter {
+  override def record(entry: AccessLogEntry): Unit =
+    emitters.foreach(_.record(entry))
+  override def recordContext(entry: PricingContextLogEntry): Unit =
+    emitters.foreach(_.recordContext(entry))
+  override def recordHeaders(entry: RequestHeadersLogEntry): Unit =
+    emitters.foreach(_.recordHeaders(entry))
+  override def close(): Unit =
+    emitters.foreach(_.close())
 }
 
 /**
@@ -192,9 +231,13 @@ class JsonAccessLogEmitter extends AccessLogEmitter {
       "requestType" -> entry.requestType
     )
 
-    // Optional context fields
+    // Optional context fields (including audit fields)
     val contextPayload = Seq(
-      entry.clientRegion.map("clientRegion" -> _)
+      entry.clientRegion.map("clientRegion" -> _),
+      entry.tenantId.map("tenantId" -> _),
+      entry.clientIp.map("clientIp" -> _),
+      entry.rawRegionHeader.map("rawRegionHeader" -> _),
+      entry.isGcpIp.map("isGcpIp" -> _)
     ).flatten.toMap
 
     val logPayload = basePayload ++ contextPayload

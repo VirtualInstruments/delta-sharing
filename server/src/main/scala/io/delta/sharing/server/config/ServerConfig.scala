@@ -152,7 +152,17 @@ case class AccessLoggingConfig(
     // Enable GCP traffic detection using GCP's published IP ranges (cloud.json).
     // When true, client IPs belonging to other GCP regions can be classified as inter-region
     // (cheaper) rather than internet egress. Set to false to disable this detection.
-    @BeanProperty var detectGcpTraffic: Boolean) extends ConfigItem {
+    @BeanProperty var detectGcpTraffic: Boolean,
+    // GCS base path for the consolidated access log Delta table. When set, ACCESS_LOG
+    // entries are written asynchronously to `{deltaTablePath}/access_log_br__system`
+    // in addition to JSON logs. The Delta table must be pre-created by deltalake-admin;
+    // the server does not auto-create schema. Leave null or empty to disable Delta writing.
+    // Example: gs://my-bucket/datalake/data/tenant/_system
+    @BeanProperty var deltaTablePath: String,
+    // How often (seconds) to flush buffered access log records to the Delta table.
+    @BeanProperty var deltaFlushIntervalSeconds: Int,
+    // Maximum number of records to buffer before triggering an early flush.
+    @BeanProperty var deltaFlushBatchSize: Int) extends ConfigItem {
 
   def this() = {
     this(
@@ -161,7 +171,10 @@ case class AccessLoggingConfig(
       clientIpHeader = "x-forwarded-for",
       pricingGroups = Collections.emptyMap(),
       sourceRegion = "",
-      detectGcpTraffic = true)
+      detectGcpTraffic = true,
+      deltaTablePath = null,
+      deltaFlushIntervalSeconds = 60,
+      deltaFlushBatchSize = 1000)
   }
 
   override def checkConfig(): Unit = {

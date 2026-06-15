@@ -9,6 +9,7 @@ When enabled, each data access emits JSON logs with:
 - Total egress bytes
 - Pricing tier (e.g., `internet_to_na_eu`, `interregion_na_to_eu`)
 - Client region code
+- Audit fields for customer audits (clientIp, rawRegionHeader, isGcpIp, tenantId)
 
 ---
 
@@ -125,6 +126,12 @@ accessLogging:
   detectGcpTraffic: true                # Enable GCP IP range lookup
   clientRegionHeader: "x-client-region" # Header with country code
   clientIpHeader: "x-forwarded-for"     # Header with client IP chain
+  # Base path for the consolidated access log Delta table.
+  # All access logs are written to a single table: access_log_br__system
+  # Omit to disable Delta writing.
+  deltaTablePath: "gs://<bucket>/datalake/data/tenant/_system"
+  deltaFlushIntervalSeconds: 60         # Max seconds between Delta flushes (default: 60)
+  deltaFlushBatchSize: 1000             # Records per flush before early trigger (default: 1000)
 ```
 
 ### GCP Load Balancer Headers
@@ -134,6 +141,73 @@ Configure custom request headers on your backend:
 X-Client-Region: {client_region}
 X-Client-Region-Subdivision: {client_region_subdivision}
 ```
+
+---
+
+## Delta Lake Storage
+
+When `deltaTablePath` is configured, `ACCESS_LOG` entries are written asynchronously to
+a consolidated Delta table on GCS in addition to the JSON log stream. This enables durable storage and
+SQL-queryable access via Delta Sharing.
+
+### Consolidated Table
+
+All access logs are written to a single consolidated table `access_log_br__system`. The `tenantId`
+field is included in each record for filtering by tenant. This simplifies cross-tenant queries
+and consolidates all egress data in one location.
+
+**Note:** `access_log_br__system` has double underscore in it's name (one as a separator and one from _system tenant's name).
+
+**IMPORTANT:** The Delta table must be pre-created by the `deltalake-admin` tool during tenant
+onboarding. The Delta Sharing server does not auto-create the table schema. 
+
+| Property | Value |
+|----------|-------|
+| **Table Name** | `access_log_br__system` |
+| **GCS Path** | `{deltaTablePath}/access_log_br__system` |
+| **Partitioning** | None (unpartitioned for simplified queries) |
+| **Format** | Parquet + Delta transaction log |
+| **Pre-requisite** | Table must be created by `deltalake-admin` before first write |
+
+### Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `logType` | string | Always "ACCESS_LOG" |
+| `share` | string | Share name |
+| `schema` | string | Schema name |
+| `table` | string | Table name |
+| `egressBytes` | long | Bytes transferred |
+| `pricingTier` | string | GCP pricing tier (see Pricing Tiers) |
+| `timestampMs` | long | Timestamp in milliseconds |
+| `requestType` | string | "query" or "cdf_stream" |
+| `clientRegion` | string | ISO 3166-1 alpha-2 country code |
+| `tenantId` | string | Tenant identifier (derived from share name) |
+| `clientIp` | string | Client IP address for audit |
+| `rawRegionHeader` | string | Raw region header value for audit |
+| `isGcpIp` | boolean | Whether client IP is in GCP ranges |
+
+### GCS Base Paths by Environment
+
+| Environment | Table Path |
+|-------------|------------|
+| zing-dev | `gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zing-preview | `gs://zing-preview-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod | `gs://zcloud-prod-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod2 | `gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+| zcloud-prod3 | `gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system/access_log_br__system` |
+
+### Delta Write Behavior
+
+- Records are buffered in a bounded in-memory queue (capacity: 100,000) and written by a
+  background daemon thread — the request path is never blocked.
+- A flush is triggered when `deltaFlushBatchSize` records accumulate or `deltaFlushIntervalSeconds`
+  elapses, whichever comes first.
+- Queue overflow silently drops records (logged as a warning); write errors are logged to stderr
+  and never propagate to clients.
+- On graceful shutdown the writer makes a best-effort attempt to drain the queue (up to ~30s) before the process exits.
+- Only `ACCESS_LOG` entries are written to Delta. `PRICING_CONTEXT` and `REQUEST_HEADERS`
+  entries are log-only.
 
 ---
 
@@ -150,7 +224,11 @@ X-Client-Region-Subdivision: {client_region_subdivision}
   "pricingTier": "internet_to_na_eu",
   "timestampMs": 1717502400000,
   "requestType": "query",
-  "clientRegion": "US"
+  "clientRegion": "US",
+  "tenantId": "my_tenant",
+  "clientIp": "203.0.113.45",
+  "rawRegionHeader": "US",
+  "isGcpIp": false
 }
 ```
 
@@ -191,8 +269,9 @@ X-Client-Region-Subdivision: {client_region_subdivision}
 |------|---------|
 | `GcpPricingTier.scala` | Continent mapping, egress type detection, pricing calculation |
 | `GcpIpRangeLookup.scala` | GCP IP range fetching and CIDR trie lookup |
-| `AccessLogEmitter.scala` | Log entry models and JSON emission |
-| `DeltaSharingService.scala` | Integration for query/CDF endpoints |
+| `AccessLogEmitter.scala` | Log entry models with audit fields, JSON emission, composite fan-out |
+| `DeltaAccessLogWriter.scala` | Async Delta Lake writer to consolidated `access_log_br__system` table |
+| `DeltaSharingService.scala` | Integration for query/CDF endpoints, tenant ID extraction |
 | `ServerConfig.scala` | `AccessLoggingConfig` model |
 
 ### Egress Bytes Calculation
@@ -203,7 +282,10 @@ Sum of `size` from all file actions: `AddFile`, `AddFileForCDF`, `AddCDCFile`.
 
 ## Notes
 
-- Logs emitted to `delta.sharing.access` logger
-- Zero-byte requests not logged
+- JSON logs emitted to `delta.sharing.access` logger
+- Zero-byte requests not logged (neither to JSON nor Delta)
 - GCP IP ranges refreshed every 24 hours
 - Pricing tiers match GCP documentation
+- Delta writes are additive; disabling `deltaTablePath` has no effect on JSON log output
+- All tenant access logs are consolidated in a single `access_log_br__system` table
+- Audit fields (clientIp, rawRegionHeader, isGcpIp, tenantId) support customer audit requirements

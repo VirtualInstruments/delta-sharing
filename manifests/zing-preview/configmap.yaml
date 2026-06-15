@@ -27,3 +27,4 @@ data:
       detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
+      deltaTablePath: "gs://zing-preview-dl-v1/datalake/data/tenant/_system"
