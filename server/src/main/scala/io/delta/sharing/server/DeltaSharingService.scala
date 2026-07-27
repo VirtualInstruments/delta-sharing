@@ -1252,6 +1252,7 @@ object DeltaSharingService {
         .defaultHostname(serverConfig.getHost)
         .disableDateHeader()
         .disableServerHeader()
+        .idleTimeout(java.time.Duration.ofSeconds(serverConfig.idleTimeoutSeconds))
         .requestTimeout(java.time.Duration.ofSeconds(serverConfig.requestTimeoutSeconds))
         .annotatedService(serverConfig.endpoint, service: Any)
       if (serverConfig.ssl == null) {

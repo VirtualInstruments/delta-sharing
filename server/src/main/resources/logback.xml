@@ -7,6 +7,11 @@
     </encoder>
   </appender>
 
+  <!-- Native Hadoop libs are not present in the container image; the pure-Java
+       fallback works correctly for GCS-backed Delta tables. Suppress the WARN
+       so it doesn't pollute Cloud Logging. -->
+  <logger name="org.apache.hadoop.util.NativeCodeLoader" level="ERROR" />
+
   <root level="INFO">
     <appender-ref ref="GCP_JSON" />
   </root>

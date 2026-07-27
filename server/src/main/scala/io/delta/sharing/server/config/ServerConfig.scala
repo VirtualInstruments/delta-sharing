@@ -68,6 +68,10 @@ case class ServerConfig(
     @BeanProperty var refreshTokenTtlMs: Int,
     // Whether to emit performance/timing log lines for table queries and CDF requests.
     @BeanProperty var perfLoggingEnabled: Boolean,
+    // The idle connection timeout in seconds. Connections idle for longer than this are closed.
+    // Should be greater than the proxy's IdleConnTimeout to avoid stale-connection EOF errors.
+    // Set to 0 to use Armeria's built-in default (15 seconds).
+    @BeanProperty var idleTimeoutSeconds: Long,
     // Access logging configuration for tracking share data egress via structured logs.
     @BeanProperty var accessLogging: AccessLoggingConfig
 ) extends ConfigItem {
@@ -94,6 +98,7 @@ case class ServerConfig(
       queryTablePageTokenTtlMs = 259200000, // 3 days
       refreshTokenTtlMs = 3600000, // 1 hour
       perfLoggingEnabled = true,
+      idleTimeoutSeconds = 120,
       accessLogging = null
     )
   }
