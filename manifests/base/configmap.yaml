@@ -22,7 +22,7 @@ data:
     evaluatePredicateHints: false
     evaluateJsonPredicateHints: true
     evaluateJsonPredicateHintsV2: true
-    requestTimeoutSeconds: 180
+    requestTimeoutSeconds: 300
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000

@@ -84,7 +84,7 @@ preSignedUrlTimeoutSeconds: 3600
 deltaTableCacheSize: 100
 evaluateJsonPredicateHints: true
 evaluateJsonPredicateHintsV2: true
-requestTimeoutSeconds: 180
+requestTimeoutSeconds: 300
 idleTimeoutSeconds: 120     # Must exceed the proxy's IdleConnTimeout or clients see EOF errors
 queryTablePageSizeLimit: 10000
 perfLoggingEnabled: true
