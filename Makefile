@@ -2,15 +2,16 @@
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVER_VERSION := $(shell grep 'version in ThisBuild' $(REPO_ROOT)version.sbt | sed 's/.*"\(.*\)".*/\1/')
 SERVICE_IMAGE := $(shell grep '^SERVICE_IMAGE' $(REPO_ROOT).env | cut -d'=' -f2)
-# Resolve IMAGE_TAG from ci/.env (used for push and deploy)
-# IMAGE_TAG := $(shell grep '^IMAGE_TAG' $(REPO_ROOT)ci/.env | cut -d':' -f2 | tr -d ' =')
+# IMAGE_TAG is normally supplied by the caller (e.g. Jenkins export). ?= leaves an
+# already-set/exported value alone and only supplies "dev" for local builds -
+IMAGE_TAG ?= dev
 
 .PHONY: image
 image:
 	@echo "Building Docker image from fork (version $(SERVER_VERSION))"
 	@cd $(REPO_ROOT) && build/sbt server/docker:publishLocal
 	@echo "Image built: deltaio/delta-sharing-server:$(SERVER_VERSION)"
-	@docker tag deltaio/delta-sharing-server:$(SERVER_VERSION) ${SERVICE_IMAGE}:${IMAGE_TAG:-dev}
+	@docker tag deltaio/delta-sharing-server:$(SERVER_VERSION) ${SERVICE_IMAGE}:${IMAGE_TAG}
 
 .PHONY: push-dev
 push-dev:
