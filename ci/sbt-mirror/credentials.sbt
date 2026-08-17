@@ -1,0 +1,14 @@
+// DEVOPS-6131 (generated copy - do not edit here; source: ci/sbt-mirror/credentials.sbt).
+// sbt's lm-coursier only authenticates via the native `credentials` setting (not the coursier
+// properties file / COURSIER_CREDENTIALS env). ci/sbt-mirror/setup.sh drops this at both the build
+// root and project/ (meta build) so library AND plugin resolution can reach the virtana-zing mirror.
+// The token comes from the AR_TOKEN env var (exported by sourcing .ar-token.env before the build),
+// so no secret lives in this file; with AR_TOKEN unset (local dev, mirror not used) the password is
+// empty and this credential is simply never matched/used.
+//
+// Scope = ThisBuild so EVERY subproject (server/client/spark) sees the credential. A plain
+// `credentials += ...` is root-project-only, so Ivy resolution for the subprojects (scalastyle,
+// makePom) found no credential and logged "Unable to find credentials for [... @ us-maven.pkg.dev]"
+// even though coursier (which aggregates credentials build-wide) still downloaded everything.
+// Realm matches exactly what AR sends in WWW-Authenticate: Basic realm="https://us-maven.pkg.dev".
+ThisBuild / credentials += Credentials("https://us-maven.pkg.dev", "us-maven.pkg.dev", "oauth2accesstoken", sys.env.getOrElse("AR_TOKEN", ""))

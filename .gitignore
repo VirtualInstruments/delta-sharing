@@ -116,3 +116,7 @@ spark-warehouse/
 # For venv
 *.venv
 .venv/
+/credentials.sbt
+/project/credentials.sbt
+/.sbtopts
+/.sbt-mirror-repositories
