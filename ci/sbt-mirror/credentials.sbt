@@ -6,9 +6,9 @@
 // so no secret lives in this file; with AR_TOKEN unset (local dev, mirror not used) the password is
 // empty and this credential is simply never matched/used.
 //
-// The realm MUST be "https://us-maven.pkg.dev" (exactly what AR sends in its WWW-Authenticate
-// header). coursier matches credentials by host alone, but sbt's Ivy code path matches by realm too;
-// an empty realm makes Ivy log "Unable to find credentials for [https://us-maven.pkg.dev @ ...]"
-// during makePom/metadata even though the build still succeeds via coursier. Matching the realm
-// silences those.
-credentials += Credentials("https://us-maven.pkg.dev", "us-maven.pkg.dev", "oauth2accesstoken", sys.env.getOrElse("AR_TOKEN", ""))
+// Scope = ThisBuild so EVERY subproject (server/client/spark) sees the credential. A plain
+// `credentials += ...` is root-project-only, so Ivy resolution for the subprojects (scalastyle,
+// makePom) found no credential and logged "Unable to find credentials for [... @ us-maven.pkg.dev]"
+// even though coursier (which aggregates credentials build-wide) still downloaded everything.
+// Realm matches exactly what AR sends in WWW-Authenticate: Basic realm="https://us-maven.pkg.dev".
+ThisBuild / credentials += Credentials("https://us-maven.pkg.dev", "us-maven.pkg.dev", "oauth2accesstoken", sys.env.getOrElse("AR_TOKEN", ""))
