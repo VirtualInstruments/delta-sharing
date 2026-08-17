@@ -22,7 +22,70 @@ node('docker-big') {
         try {
             stage('Build image') {
                 ansiColor('xterm') {
-                    sh("${MAKE} build")
+                    // DEVOPS-6131: route sbt's Maven-Central resolution through the virtana-zing
+                    // Artifact Registry mirror. jenkins-eng's shared egress IP gets 429'd by
+                    // Central's Cloudflare front-end, which breaks sbt's own launcher/dependency
+                    // download. This is the sbt analog of the mirrorMavenCentral shared step
+                    // (sbt reads ~/.sbt/repositories + its native `credentials`, not settings.xml).
+                    // Auth: short-lived OAuth token minted from gcr_push_key (zing-gcr-push, has
+                    // artifactregistry read on zing-registry-188222). set +x keeps it out of the log.
+                    withCredentials([file(credentialsId: 'gcr_push_key', variable: 'AR_KEY_FILE')]) {
+                        sh '''
+                            set +x
+                            set -e
+                            MIRROR="https://us-maven.pkg.dev/zing-registry-188222/virtana-zing"
+                            SBT_VERSION="$(awk -F= '/sbt.version/{gsub(/ /,"",$2);print $2}' project/build.properties)"
+
+                            # Mint the token in a throwaway gcloud config so the agent's own
+                            # active account is left untouched (agents are reused across builds).
+                            AR_TOKEN="$(
+                                CLOUDSDK_CONFIG="$(mktemp -d)"; export CLOUDSDK_CONFIG
+                                gcloud auth activate-service-account --key-file="$AR_KEY_FILE" --quiet 1>&2
+                                gcloud auth print-access-token
+                                rm -rf "$CLOUDSDK_CONFIG"
+                            )"
+                            export AR_TOKEN
+
+                            # 1) sbt boot + dependency resolution: maven-central -> mirror.
+                            mkdir -p "$HOME/.sbt" "$HOME/.config/coursier"
+                            cat > "$HOME/.sbt/repositories" <<EOF
+[repositories]
+  local
+  maven-central: ${MIRROR}
+  sbt-plugin-releases: https://repo.scala-sbt.org/scalasbt/sbt-plugin-releases/, [organization]/[module]/(scala_[scalaVersion]/)(sbt_[sbtVersion]/)[revision]/[type]s/[artifact](-[classifier]).[ext]
+  typesafe-ivy-releases: https://repo.typesafe.com/typesafe/ivy-releases/, [organization]/[module]/[revision]/[type]s/[artifact](-[classifier]).[ext], bootOnly
+  sbt-ivy-snapshots: https://repo.scala-sbt.org/scalasbt/ivy-snapshots/, [organization]/[module]/[revision]/[type]s/[artifact](-[classifier]).[ext], bootOnly
+EOF
+
+                            # 2) credentials for the mirror host, at every consumer:
+                            #    - coursier properties file  -> the sbt LAUNCHER's shaded coursier (boot)
+                            #    - credentials.sbt           -> the main build (library deps)
+                            #    - project/credentials.sbt   -> the meta build (sbt plugins)
+                            #    lm-coursier only honors sbt's native `credentials`, not the file/env.
+                            cat > "$HOME/.config/coursier/credentials.properties" <<EOF
+virtana-zing.host=us-maven.pkg.dev
+virtana-zing.username=oauth2accesstoken
+virtana-zing.password=${AR_TOKEN}
+virtana-zing.auto=true
+EOF
+                            CRED_LINE='credentials += Credentials("", "us-maven.pkg.dev", "oauth2accesstoken", sys.env.getOrElse("AR_TOKEN", ""))'
+                            echo "$CRED_LINE" > credentials.sbt
+                            echo "$CRED_LINE" > project/credentials.sbt
+
+                            # 3) pre-fetch the sbt launch jar through the mirror (the bare curl in
+                            #    build/sbt-launch-lib.bash can't send an auth header itself).
+                            mkdir -p build
+                            curl --fail --location --silent \
+                                 -H "Authorization: Bearer ${AR_TOKEN}" \
+                                 "${MIRROR}/org/scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch-${SBT_VERSION}.jar" \
+                                 -o "build/sbt-launch-${SBT_VERSION}.jar"
+
+                            # 4) force sbt to use ONLY the mirror repositories (no fallback to Central).
+                            export SBT_OPTS="-Dsbt.repository.config=$HOME/.sbt/repositories -Dsbt.override.build.repos=true"
+
+                            make -f ci/Makefile build
+                        '''
+                    }
                 }
             }
 
@@ -42,6 +105,8 @@ node('docker-big') {
 
         } finally {
             stage ('Clean test environment') {
+                // remove the token-bearing coursier properties from the shared agent HOME
+                sh('rm -f "$HOME/.config/coursier/credentials.properties" || true')
                 sh("${MAKE} clean")
             }
         }
