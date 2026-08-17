@@ -50,6 +50,7 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 
 ### Deployment & docs
 
+- `manifests/` — `requestTimeoutSeconds` raised from 180 to 300 (3 min → 5 min) across base and all environment overlays; the near-timeout warning logs (fired at 75% of the configured limit)
 - `manifests/` — Kustomize base + 6 environment overlays
 - `ci/` — Jenkinsfile, Makefile, `deploy.sh`, per-environment deployment YAML
 - `Makefile` — image build and `deploy-*` targets
