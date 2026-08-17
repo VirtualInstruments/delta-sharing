@@ -23,13 +23,13 @@ node('docker-big') {
             stage('Build image') {
                 ansiColor('xterm') {
                     // DEVOPS-6131: sbt can't reach Maven Central from jenkins-eng (shared egress IP
-                    // is 429'd), so ci/sbt-mirror/setup.sh points sbt at the virtana-zing Artifact
-                    // Registry proxy before the build. Auth = short-lived token minted from
-                    // gcr_push_key. All the logic + config templates live in ci/sbt-mirror/.
+                    // is 429'd). ci/sbt-mirror/with-mirror.sh runs the build with sbt pointed at the
+                    // virtana-zing Artifact Registry proxy: it mints a short-lived token from
+                    // gcr_push_key (in-process; gcloud uses a throwaway config so the agent account
+                    // is untouched) and cleans up its transient config on exit. Logic + templates
+                    // all live in ci/sbt-mirror/.
                     withCredentials([file(credentialsId: 'gcr_push_key', variable: 'AR_KEY_FILE')]) {
-                        // set +x FIRST: sourcing .ar-token.env would otherwise echo the token
-                        // (Jenkins runs sh with -x). Keep this leading `set +x`.
-                        sh("set +x; ci/sbt-mirror/setup.sh && . ./.ar-token.env && ${MAKE} build")
+                        sh("ci/sbt-mirror/with-mirror.sh ${MAKE} build")
                     }
                 }
             }
@@ -50,8 +50,7 @@ node('docker-big') {
 
         } finally {
             stage ('Clean test environment') {
-                // remove token-bearing files setup.sh wrote (HOME + workspace)
-                sh('rm -f "$HOME/.config/coursier/credentials.properties" ./.ar-token.env || true')
+                // with-mirror.sh removes its own auth files via an EXIT trap; just clean the build.
                 sh("${MAKE} clean")
             }
         }

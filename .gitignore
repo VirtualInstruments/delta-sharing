@@ -119,4 +119,4 @@ spark-warehouse/
 /credentials.sbt
 /project/credentials.sbt
 /.sbtopts
-/.ar-token.env
+/.sbt-mirror-repositories
