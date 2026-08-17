@@ -3,8 +3,6 @@
 // properties file / COURSIER_CREDENTIALS env). ci/sbt-mirror/setup.sh drops this at both the build
 // root and project/ (meta build) so library AND plugin resolution can reach the virtana-zing mirror.
 // The token comes from the AR_TOKEN env var (exported by sourcing .ar-token.env before the build),
-// so no secret lives in this file; with AR_TOKEN unset (e.g. a local dev build not using the
-// mirror) it adds no credentials.
-credentials ++= sys.env.get("AR_TOKEN").filter(_.nonEmpty).map { token =>
-  Credentials("Artifact Registry", "us-maven.pkg.dev", "oauth2accesstoken", token)
-}.toSeq
+// so no secret lives in this file; with AR_TOKEN unset (local dev, mirror not used) the password is
+// empty and this credential is simply never matched/used.
+credentials += Credentials("", "us-maven.pkg.dev", "oauth2accesstoken", sys.env.getOrElse("AR_TOKEN", ""))

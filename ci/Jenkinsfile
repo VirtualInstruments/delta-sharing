@@ -27,7 +27,9 @@ node('docker-big') {
                     // Registry proxy before the build. Auth = short-lived token minted from
                     // gcr_push_key. All the logic + config templates live in ci/sbt-mirror/.
                     withCredentials([file(credentialsId: 'gcr_push_key', variable: 'AR_KEY_FILE')]) {
-                        sh("ci/sbt-mirror/setup.sh && . ./.ar-token.env && ${MAKE} build")
+                        // set +x FIRST: sourcing .ar-token.env would otherwise echo the token
+                        // (Jenkins runs sh with -x). Keep this leading `set +x`.
+                        sh("set +x; ci/sbt-mirror/setup.sh && . ./.ar-token.env && ${MAKE} build")
                     }
                 }
             }
