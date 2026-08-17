@@ -10,15 +10,16 @@
 #
 # Usage (from a pipeline, credential bound as AR_KEY_FILE):
 #     withCredentials([file(credentialsId: 'gcr_push_key', variable: 'AR_KEY_FILE')]) {
-#         sh 'ci/sbt-mirror/setup.sh && make -f ci/Makefile build'
+#         sh 'ci/sbt-mirror/setup.sh && . ./.ar-token.env && make -f ci/Makefile build'
 #     }
+# (source .ar-token.env so $AR_TOKEN reaches sbt; setup.sh runs in its own process.)
 #
 # AR_KEY_FILE must point at a GCP service-account key with artifactregistry.reader on
 # zing-registry-188222. sbt here runs directly on the Jenkins agent, so config is written to the
 # agent HOME - no container mount needed. (If a build ran sbt inside a container, mount $HOME/.sbt
 # and $HOME/.config/coursier into it.)
 #
-# Cleanup of the token-bearing files ($HOME/.sbt/.ar-token, coursier credentials.properties) is the
+# Cleanup of the token-bearing files (.ar-token.env, coursier credentials.properties) is the
 # caller's responsibility - do it in the pipeline's finally block.
 
 set -eu
@@ -46,15 +47,21 @@ cp "${SCRIPT_DIR}/repositories" "${HOME}/.sbt/repositories"
 
 # 2) credentials for the mirror host:
 #    a) coursier properties (token populated from template) -> the sbt LAUNCHER's shaded coursier (boot);
-#    b) token file + credentials.sbt at build root AND project/ (meta) -> lm-coursier for deps + plugins.
+#    b) credentials.sbt at build root AND project/ (meta) -> lm-coursier for deps + plugins. It reads
+#       the token from $AR_TOKEN, delivered by sourcing .ar-token.env just before `make` (lm-coursier
+#       honors only sbt's native `credentials`, not the coursier file/env).
 while IFS= read -r line || [ -n "${line}" ]; do
     printf '%s\n' "${line//'${AR_TOKEN}'/${AR_TOKEN}}"
 done < "${SCRIPT_DIR}/credentials.properties.tmpl" > "${HOME}/.config/coursier/credentials.properties"
+chmod 600 "${HOME}/.config/coursier/credentials.properties"
 
-printf '%s' "${AR_TOKEN}" > "${HOME}/.sbt/.ar-token"
-chmod 600 "${HOME}/.sbt/.ar-token" "${HOME}/.config/coursier/credentials.properties"
 cp "${SCRIPT_DIR}/credentials.sbt" "${REPO_ROOT}/credentials.sbt"
 cp "${SCRIPT_DIR}/credentials.sbt" "${REPO_ROOT}/project/credentials.sbt"
+
+# AR_TOKEN for lm-coursier: written to a sourceable env file rather than exported, because setup.sh
+# runs as its own process - the caller does `. ./.ar-token.env` before make so it reaches sbt.
+printf "export AR_TOKEN='%s'\n" "${AR_TOKEN}" > "${REPO_ROOT}/.ar-token.env"
+chmod 600 "${REPO_ROOT}/.ar-token.env"
 
 # 3) pre-fetch the sbt launch jar through the mirror (build/sbt-launch-lib.bash's bare curl can't auth).
 mkdir -p "${REPO_ROOT}/build"

@@ -27,7 +27,7 @@ node('docker-big') {
                     // Registry proxy before the build. Auth = short-lived token minted from
                     // gcr_push_key. All the logic + config templates live in ci/sbt-mirror/.
                     withCredentials([file(credentialsId: 'gcr_push_key', variable: 'AR_KEY_FILE')]) {
-                        sh("ci/sbt-mirror/setup.sh && ${MAKE} build")
+                        sh("ci/sbt-mirror/setup.sh && . ./.ar-token.env && ${MAKE} build")
                     }
                 }
             }
@@ -48,8 +48,8 @@ node('docker-big') {
 
         } finally {
             stage ('Clean test environment') {
-                // remove token-bearing files setup.sh wrote into the shared agent HOME
-                sh('rm -f "$HOME/.config/coursier/credentials.properties" "$HOME/.sbt/.ar-token" || true')
+                // remove token-bearing files setup.sh wrote (HOME + workspace)
+                sh('rm -f "$HOME/.config/coursier/credentials.properties" ./.ar-token.env || true')
                 sh("${MAKE} clean")
             }
         }
