@@ -22,6 +22,8 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Base64
 
 import scala.collection.JavaConverters._
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration._
 
 import com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem
 import com.google.common.hash.Hashing
@@ -126,6 +128,35 @@ class DeltaSharedTable(
     } else {
       func
     }
+  }
+
+  /**
+   * Sign multiple file paths in parallel and return the signed URLs in the same order.
+   */
+  private def parallelSign(paths: Seq[Path]): Seq[PreSignedUrl] = {
+    if (paths.isEmpty) {
+      return Seq.empty
+    }
+
+    if (paths.size == 1) {
+      // Skip parallel overhead for single path
+      return Seq(fileSigner.sign(paths.head))
+    }
+
+    implicit val ec: ExecutionContext = DeltaSharedTable.signingExecutionContext
+
+    val signFutures = paths.map { path =>
+      Future {
+        withClassLoader {
+          fileSigner.sign(path)
+        }
+      }
+    }
+
+    val allFutures = Future.sequence(signFutures)
+    // scalastyle:off awaitresult
+    Await.result(allFutures, 2.minutes)
+    // scalastyle:on awaitresult
   }
 
   /** Check if the table version in deltalog is valid */
@@ -627,103 +658,145 @@ class DeltaSharedTable(
     }
     var minUrlExpirationTimestamp = Long.MaxValue
     var numSignedFiles = 0
-    val actions = ListBuffer[Object]()
-    var signingNs = 0L
-    def timedSignChangeFile(path: Path): PreSignedUrl = {
-      val a = System.nanoTime()
-      val u = fileSigner.sign(path)
-      signingNs += System.nanoTime() - a
-      u
-    }
+
+    // Track actions that need signing and non-file actions, preserving order
+    case class FileToSign(
+      path: Path,
+      action: Either[AddFile, RemoveFile],
+      version: Long,
+      timestamp: java.sql.Timestamp,
+      idx: Int)
+
+    sealed trait ActionItem
+    case class SignedFileItem(fileToSign: FileToSign) extends ActionItem
+    case class MetadataItem(m: Metadata, v: Long) extends ActionItem
+
+    val filesToSign = ListBuffer[FileToSign]()
+    val orderedItems = ListBuffer[ActionItem]()
+    var earlyReturnToken: Option[String] = None
     var versionsIterated = 0
     val tScan = System.nanoTime()
+
     deltaLog
       .getChanges(start, true)
       .asScala
       .toSeq
       .filter(_.getVersion <= end)
       .foreach { versionLog =>
-        versionsIterated += 1
-        val v = versionLog.getVersion
-        var indexedVersionActions =
-          versionLog.getActions.asScala.map(x => ConversionUtils.convertActionJ(x)).zipWithIndex
-        val ts = timestampsByVersion.get(v).orNull
-        if (pageTokenOpt.exists(_.getStartingVersion == v)) {
-          // Skip actions that are already processed in previous pages
-          indexedVersionActions =
-            indexedVersionActions.drop(pageTokenOpt.get.getStartingActionIndex)
+        if (earlyReturnToken.isEmpty) {
+          versionsIterated += 1
+          val v = versionLog.getVersion
+          var indexedVersionActions =
+            versionLog.getActions.asScala.map(x => ConversionUtils.convertActionJ(x)).zipWithIndex
+          val ts = timestampsByVersion.get(v).orNull
+          if (pageTokenOpt.exists(_.getStartingVersion == v)) {
+            // Skip actions that are already processed in previous pages
+            indexedVersionActions =
+              indexedVersionActions.drop(pageTokenOpt.get.getStartingActionIndex)
+          }
+          indexedVersionActions.foreach {
+            case (a: AddFile, idx) if a.dataChange && earlyReturnToken.isEmpty =>
+              // Check if we've reached page size limit
+              if (pageSizeOpt.contains(numSignedFiles)) {
+                earlyReturnToken = Some(tokenGenerator(v, idx))
+              } else {
+                val fileToSign = FileToSign(
+                  absolutePath(deltaLog.dataPath, a.path),
+                  Left(a),
+                  v,
+                  ts,
+                  idx
+                )
+                filesToSign.append(fileToSign)
+                orderedItems.append(SignedFileItem(fileToSign))
+                numSignedFiles += 1
+              }
+            case (r: RemoveFile, idx) if r.dataChange && earlyReturnToken.isEmpty =>
+              // Check if we've reached page size limit
+              if (pageSizeOpt.contains(numSignedFiles)) {
+                earlyReturnToken = Some(tokenGenerator(v, idx))
+              } else {
+                val fileToSign = FileToSign(
+                  absolutePath(deltaLog.dataPath, r.path),
+                  Right(r),
+                  v,
+                  ts,
+                  idx
+                )
+                filesToSign.append(fileToSign)
+                orderedItems.append(SignedFileItem(fileToSign))
+                numSignedFiles += 1
+              }
+            case (p: Protocol, _) if earlyReturnToken.isEmpty =>
+              assertProtocolRead(p)
+            case (m: Metadata, _) if earlyReturnToken.isEmpty =>
+              if (v > startingVersion) {
+                orderedItems.append(MetadataItem(m, v))
+              }
+            case _ => ()
+          }
         }
-        indexedVersionActions.foreach {
-          case (a: AddFile, idx) if a.dataChange =>
-            // Return early if we already have enough files in the current page
-            if (pageSizeOpt.contains(numSignedFiles)) {
-              actions.append(getEndStreamAction(tokenGenerator(v, idx), minUrlExpirationTimestamp))
-              val scanWallNs = System.nanoTime() - tScan
-              return (
-                actions.toSeq,
-                timestampIndexNs,
-                scanWallNs - signingNs,
-                signingNs,
-                versionsIterated,
-                start,
-                end)
-            }
-            val preSignedUrl = timedSignChangeFile(absolutePath(deltaLog.dataPath, a.path))
-            minUrlExpirationTimestamp =
-              minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
+      }
+
+    val tSign = System.nanoTime()
+    val signedUrls = parallelSign(filesToSign.map(_.path).toSeq)
+    val signingNs = System.nanoTime() - tSign
+
+    val pathToSignedUrl = filesToSign.zip(signedUrls).toMap
+    val actions = ListBuffer[Object]()
+
+    orderedItems.foreach {
+      case SignedFileItem(fileToSign) =>
+        val preSignedUrl = pathToSignedUrl(fileToSign)
+        minUrlExpirationTimestamp =
+          minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
+
+        fileToSign.action match {
+          case Left(addFile) =>
             actions.append(
               getResponseAddFile(
-                a,
+                addFile,
                 preSignedUrl,
-                v,
-                ts.getTime,
+                fileToSign.version,
+                fileToSign.timestamp.getTime,
                 responseFormat,
                 true
               )
             )
-            numSignedFiles += 1
-          case (r: RemoveFile, idx) if r.dataChange =>
-            // Return early if we already have enough files in the current page
-            if (pageSizeOpt.contains(numSignedFiles)) {
-              actions.append(getEndStreamAction(tokenGenerator(v, idx), minUrlExpirationTimestamp))
-              val scanWallNs = System.nanoTime() - tScan
-              return (
-                actions.toSeq,
-                timestampIndexNs,
-                scanWallNs - signingNs,
-                signingNs,
-                versionsIterated,
-                start,
-                end)
-            }
-            val preSignedUrl = timedSignChangeFile(absolutePath(deltaLog.dataPath, r.path))
-            minUrlExpirationTimestamp =
-              minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
+          case Right(removeFile) =>
             actions.append(
               getResponseRemoveFile(
-                r,
+                removeFile,
                 preSignedUrl,
-                v,
-                ts.getTime,
+                fileToSign.version,
+                fileToSign.timestamp.getTime,
                 responseFormat
               )
             )
-            numSignedFiles += 1
-          case (p: Protocol, _) =>
-            assertProtocolRead(p)
-          case (m: Metadata, _) =>
-            if (v > startingVersion) {
-              actions.append(
-                getResponseMetadata(
-                  m,
-                  Some(v),
-                  responseFormat
-                )
-              )
-            }
-          case _ => ()
         }
-      }
+      case MetadataItem(m, v) =>
+        actions.append(
+          getResponseMetadata(
+            m,
+            Some(v),
+            responseFormat
+          )
+        )
+    }
+
+    if (earlyReturnToken.isDefined) {
+      actions.append(getEndStreamAction(earlyReturnToken.get, minUrlExpirationTimestamp))
+      val scanWallNs = System.nanoTime() - tScan
+      return (
+        actions.toSeq,
+        timestampIndexNs,
+        scanWallNs - signingNs,
+        signingNs,
+        versionsIterated,
+        start,
+        end)
+    }
+
     val scanWallNs = System.nanoTime() - tScan
     val changeReplayNs = scanWallNs - signingNs
     // Return an `endStreamAction` object only when `maxFiles` or includeEndStreamAction is
@@ -822,6 +895,28 @@ class DeltaSharedTable(
     }
     var minUrlExpirationTimestamp = Long.MaxValue
     var numSignedFiles = 0
+
+    // Track actions that need signing and non-file actions, preserving order
+    sealed trait CdfAction
+    case class AddCDCFileAction(c: AddCDCFile) extends CdfAction
+    case class AddFileAction(a: AddFile) extends CdfAction
+    case class RemoveFileAction(r: RemoveFile) extends CdfAction
+
+    case class CdfFileToSign(
+      path: Path,
+      action: CdfAction,
+      version: Long,
+      timestamp: java.sql.Timestamp,
+      idx: Int)
+
+    sealed trait CdfActionItem
+    case class CdfSignedFileItem(fileToSign: CdfFileToSign) extends CdfActionItem
+    case class CdfMetadataItem(m: Metadata, v: Long) extends CdfActionItem
+
+    val filesToSign = ListBuffer[CdfFileToSign]()
+    val orderedItems = ListBuffer[CdfActionItem]()
+    var earlyReturnToken: Option[String] = None
+
     // We use (start, end) from the page token instead of the original request because:
     // - Versions that are processed in previous pages can be skipped.
     // - Versions that are committed after the first page call should be ignored, especially
@@ -833,14 +928,8 @@ class DeltaSharedTable(
       includeHistoricalMetadata
     )
     val versionsIterated = replayOut.specs.length
-    var signingNs = 0L
-    def timedSignCdf(path: Path): PreSignedUrl = {
-      val a = System.nanoTime()
-      val u = fileSigner.sign(path)
-      signingNs += System.nanoTime() - a
-      u
-    }
-    def cdfPartialTimings(): CdfQueryTimings = {
+
+    def cdfPartialTimings(signingNs: Long): CdfQueryTimings = {
       CdfQueryTimings(
         cdfStartVersion = cdfStart,
         cdfEndVersion = cdfEnd,
@@ -856,99 +945,141 @@ class DeltaSharedTable(
       warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(pt), "cdf")
       QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(pt)))
     }
+
+    // First pass: collect files to sign and non-file actions, respecting page size
     replayOut.specs.foreach { cdcDataSpec =>
-      val v = cdcDataSpec.version
-      val ts = cdcDataSpec.timestamp
-      var indexedActions = cdcDataSpec.actions.zipWithIndex
-      if (pageTokenOpt.exists(_.getStartingVersion == v)) {
-        // Skip actions that are already processed in previous pages
-        indexedActions = indexedActions.drop(pageTokenOpt.get.getStartingActionIndex)
+      if (earlyReturnToken.isEmpty) {
+        val v = cdcDataSpec.version
+        val ts = cdcDataSpec.timestamp
+        var indexedActions = cdcDataSpec.actions.zipWithIndex
+        if (pageTokenOpt.exists(_.getStartingVersion == v)) {
+          // Skip actions that are already processed in previous pages
+          indexedActions = indexedActions.drop(pageTokenOpt.get.getStartingActionIndex)
+        }
+        indexedActions.foreach {
+          case (m: Metadata, _) if earlyReturnToken.isEmpty =>
+            orderedItems.append(CdfMetadataItem(m, v))
+          case (c: AddCDCFile, idx) if earlyReturnToken.isEmpty =>
+            // Check if we've reached page size limit
+            if (pageSizeOpt.contains(numSignedFiles)) {
+              earlyReturnToken = Some(tokenGenerator(v, idx))
+            } else {
+              val fileToSign = CdfFileToSign(
+                absolutePath(deltaLog.dataPath, c.path),
+                AddCDCFileAction(c),
+                v,
+                ts,
+                idx
+              )
+              filesToSign.append(fileToSign)
+              orderedItems.append(CdfSignedFileItem(fileToSign))
+              numSignedFiles += 1
+            }
+          case (a: AddFile, idx) if earlyReturnToken.isEmpty =>
+            // Check if we've reached page size limit
+            if (pageSizeOpt.contains(numSignedFiles)) {
+              earlyReturnToken = Some(tokenGenerator(v, idx))
+            } else {
+              val fileToSign = CdfFileToSign(
+                absolutePath(deltaLog.dataPath, a.path),
+                AddFileAction(a),
+                v,
+                ts,
+                idx
+              )
+              filesToSign.append(fileToSign)
+              orderedItems.append(CdfSignedFileItem(fileToSign))
+              numSignedFiles += 1
+            }
+          case (r: RemoveFile, idx) if earlyReturnToken.isEmpty =>
+            // Check if we've reached page size limit
+            if (pageSizeOpt.contains(numSignedFiles)) {
+              earlyReturnToken = Some(tokenGenerator(v, idx))
+            } else {
+              val fileToSign = CdfFileToSign(
+                absolutePath(deltaLog.dataPath, r.path),
+                RemoveFileAction(r),
+                v,
+                ts,
+                idx
+              )
+              filesToSign.append(fileToSign)
+              orderedItems.append(CdfSignedFileItem(fileToSign))
+              numSignedFiles += 1
+            }
+          case _ => ()
+        }
       }
-      indexedActions.foreach {
-        case (m: Metadata, _) =>
-          actions.append(
-            getResponseMetadata(
-              m,
-              Some(v),
-              responseFormat
+    }
+
+    // Second pass: sign all paths in parallel
+    val tSign = System.nanoTime()
+    val signedUrls = parallelSign(filesToSign.map(_.path).toSeq)
+    val signingNs = System.nanoTime() - tSign
+
+    // Third pass: build response actions with signed URLs
+    val pathToSignedUrl = filesToSign.zip(signedUrls).toMap
+
+    orderedItems.foreach {
+      case CdfSignedFileItem(fileToSign) =>
+        val preSignedUrl = pathToSignedUrl(fileToSign)
+        minUrlExpirationTimestamp =
+          minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
+
+        fileToSign.action match {
+          case AddCDCFileAction(c) =>
+            actions.append(
+              getResponseAddCDCFile(
+                c,
+                preSignedUrl,
+                fileToSign.version,
+                fileToSign.timestamp.getTime,
+                responseFormat
+              )
             )
-          )
-        case (c: AddCDCFile, idx) =>
-          // Return early if we already have enough files in the current page
-          if (pageSizeOpt.contains(numSignedFiles)) {
-            actions.append(getEndStreamAction(tokenGenerator(v, idx), minUrlExpirationTimestamp))
-            return cdfEarlyReturn(cdfPartialTimings())
-          }
-          val preSignedUrl = timedSignCdf(absolutePath(deltaLog.dataPath, c.path))
-          minUrlExpirationTimestamp =
-            minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
-          actions.append(
-            getResponseAddCDCFile(
-              c,
-              preSignedUrl,
-              v,
-              ts.getTime,
-              responseFormat
+          case AddFileAction(a) =>
+            actions.append(
+              getResponseAddFile(
+                a,
+                preSignedUrl,
+                fileToSign.version,
+                fileToSign.timestamp.getTime,
+                responseFormat,
+                returnAddFileForCDF = true
+              )
             )
-          )
-          numSignedFiles += 1
-        case (a: AddFile, idx) =>
-          // Return early if we already have enough files in the current page
-          if (pageSizeOpt.contains(numSignedFiles)) {
-            actions.append(getEndStreamAction(tokenGenerator(v, idx), minUrlExpirationTimestamp))
-            return cdfEarlyReturn(cdfPartialTimings())
-          }
-          val preSignedUrl = timedSignCdf(absolutePath(deltaLog.dataPath, a.path))
-          minUrlExpirationTimestamp =
-            minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
-          actions.append(
-            getResponseAddFile(
-              a,
-              preSignedUrl,
-              v,
-              ts.getTime,
-              responseFormat,
-              returnAddFileForCDF = true
+          case RemoveFileAction(r) =>
+            actions.append(
+              getResponseRemoveFile(
+                r,
+                preSignedUrl,
+                fileToSign.version,
+                fileToSign.timestamp.getTime,
+                responseFormat
+              )
             )
+        }
+      case CdfMetadataItem(m, v) =>
+        actions.append(
+          getResponseMetadata(
+            m,
+            Some(v),
+            responseFormat
           )
-          numSignedFiles += 1
-        case (r: RemoveFile, idx) =>
-          // Return early if we already have enough files in the current page
-          if (pageSizeOpt.contains(numSignedFiles)) {
-            actions.append(getEndStreamAction(tokenGenerator(v, idx), minUrlExpirationTimestamp))
-            return cdfEarlyReturn(cdfPartialTimings())
-          }
-          val preSignedUrl = timedSignCdf(absolutePath(deltaLog.dataPath, r.path))
-          minUrlExpirationTimestamp =
-            minUrlExpirationTimestamp.min(preSignedUrl.expirationTimestamp)
-          actions.append(
-            getResponseRemoveFile(
-              r,
-              preSignedUrl,
-              v,
-              ts.getTime,
-              responseFormat
-            )
-          )
-          numSignedFiles += 1
-        case _ => ()
-      }
+        )
+    }
+
+    // Handle early return if page size was exceeded
+    if (earlyReturnToken.isDefined) {
+      actions.append(getEndStreamAction(earlyReturnToken.get, minUrlExpirationTimestamp))
+      return cdfEarlyReturn(cdfPartialTimings(signingNs))
     }
     // Return an `endStreamAction` object only when `maxFiles` is specified for
     // backwards compatibility.
     if (maxFiles.isDefined || includeEndStreamAction) {
       actions.append(getEndStreamAction(null, minUrlExpirationTimestamp))
     }
-    val cdfTimings = CdfQueryTimings(
-      cdfStartVersion = cdfStart,
-      cdfEndVersion = cdfEnd,
-      versionsIterated = versionsIterated,
-      deltaLogUpdateNs = deltaLogUpdateNs,
-      protocolSnapshotNs = protocolSnapshotNs,
-      getChangesNs = replayOut.getChangesMaterializeNs,
-      timestampIndexNs = replayOut.timestampIndexNs,
-      cdcSpecBuildNs = replayOut.cdcSpecBuildNs,
-      signingNs = signingNs)
+    val cdfTimings = cdfPartialTimings(signingNs)
     warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(cdfTimings), "cdf")
     QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(cdfTimings)))
   }
@@ -1076,6 +1207,10 @@ class DeltaSharedTable(
 object DeltaSharedTable {
   val RESPONSE_FORMAT_PARQUET = "parquet"
   val RESPONSE_FORMAT_DELTA = "delta"
+
+  // Shared, bounded thread pool for parallel file signing across all tables/requests. 
+  private val signingExecutionContext: ExecutionContext = ExecutionContext.fromExecutorService(
+    java.util.concurrent.Executors.newFixedThreadPool(32))
 
   private def encodeToken[T <: GeneratedMessage](token: T): String = {
     Base64.getUrlEncoder.encodeToString(token.toByteArray)
