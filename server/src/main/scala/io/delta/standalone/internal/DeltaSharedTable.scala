@@ -153,9 +153,9 @@ class DeltaSharedTable(
       }
     }
 
-    val allFutures = Future.sequence(signFutures)
+    val allFutures = Future.sequence(signFutures)    
     // scalastyle:off awaitresult
-    Await.result(allFutures, 2.minutes)
+    Await.result(allFutures, Duration.Inf)
     // scalastyle:on awaitresult
   }
 
