@@ -34,10 +34,10 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 | File | Virtana change |
 |------|----------------|
 | `DeltaSharingService.scala` | ~600 added lines: access log emission per query/CDF request, client region + IP header extraction, egress byte accounting, idle timeout config |
-| `config/ServerConfig.scala` | New `AccessLoggingConfig` case class; new `perfLoggingEnabled` and `idleTimeoutSeconds` options |
+| `config/ServerConfig.scala` | New `AccessLoggingConfig` case class; new `perfLoggingEnabled`, `idleTimeoutSeconds`, and `signingThreadPoolSize` options |
 | `DeltaSharedTableProtocol.scala` | New `CdfQueryTimings` / `TableQueryTimings` / `QueryResultTimings` observability models; `QueryResult` gained a `timings` field |
 | `DeltaSharedTableLoader.scala` | `loadTableWithUpdateCost` returns `deltaLog.update()` elapsed time for perf logging |
-| `standalone/internal/DeltaSharedTable.scala` | Per-phase timing instrumentation (snapshot resolve, replay, signing); near-timeout warnings |
+| `standalone/internal/DeltaSharedTable.scala` | Per-phase timing instrumentation (snapshot resolve, replay, signing); near-timeout warnings; **parallel GCS V4 signing** refactor (collects paths in order, signs in parallel on a shared process-wide thread pool sized by `signingThreadPoolSize`, reassembles results in original order) — reduces signing wall time by ~50% for CDF batches with 10+ versions |
 | `standalone/internal/DeltaSharingCDCReader.scala` | CDF stream timing instrumentation |
 
 ### Build & infrastructure
