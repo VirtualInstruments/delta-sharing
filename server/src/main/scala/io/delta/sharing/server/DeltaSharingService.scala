@@ -192,6 +192,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
   private val sharedTableManager = new SharedTableManager(serverConfig)
 
+  DeltaSharedTable.configureSigningThreadPoolSize(serverConfig.signingThreadPoolSize)
+
   private val deltaSharedTableLoader = new DeltaSharedTableLoader(serverConfig)
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])

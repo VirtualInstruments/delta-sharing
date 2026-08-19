@@ -26,6 +26,7 @@ data:
     queryTablePageSizeLimit: 10000
     queryTablePageTokenTtlMs: 259200000
     refreshTokenTtlMs: 3600000
+    signingThreadPoolSize: 32
     accessLogging:
       enabled: true
       sourceRegion: "us-central1"

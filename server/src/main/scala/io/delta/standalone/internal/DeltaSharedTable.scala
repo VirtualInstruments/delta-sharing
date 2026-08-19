@@ -1208,9 +1208,19 @@ object DeltaSharedTable {
   val RESPONSE_FORMAT_PARQUET = "parquet"
   val RESPONSE_FORMAT_DELTA = "delta"
 
-  // Shared, bounded thread pool for parallel file signing across all tables/requests. 
-  private val signingExecutionContext: ExecutionContext = ExecutionContext.fromExecutorService(
-    java.util.concurrent.Executors.newFixedThreadPool(32))
+  // Size of the shared signing thread pool, configurable via ServerConfig#signingThreadPoolSize.
+  // Must be set (via `configureSigningThreadPoolSize`) before the pool is first used, since the
+  // pool itself is created lazily on first access.
+  private val signingThreadPoolSize = new java.util.concurrent.atomic.AtomicInteger(32)
+
+  def configureSigningThreadPoolSize(size: Int): Unit = {
+    require(size > 0, s"signingThreadPoolSize must be positive, got $size")
+    signingThreadPoolSize.set(size)
+  }
+
+  // Shared, bounded thread pool for parallel file signing across all tables/requests.
+  private lazy val signingExecutionContext: ExecutionContext = ExecutionContext.fromExecutorService(
+    java.util.concurrent.Executors.newFixedThreadPool(signingThreadPoolSize.get()))
 
   private def encodeToken[T <: GeneratedMessage](token: T): String = {
     Base64.getUrlEncoder.encodeToString(token.toByteArray)

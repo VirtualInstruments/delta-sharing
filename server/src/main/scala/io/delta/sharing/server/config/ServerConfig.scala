@@ -73,7 +73,9 @@ case class ServerConfig(
     // Set to 0 to use Armeria's built-in default (15 seconds).
     @BeanProperty var idleTimeoutSeconds: Long,
     // Access logging configuration for tracking share data egress via structured logs.
-    @BeanProperty var accessLogging: AccessLoggingConfig
+    @BeanProperty var accessLogging: AccessLoggingConfig,
+    // The number of threads used to sign file URLs in parallel (queryTable/queryTableChanges).
+    @BeanProperty var signingThreadPoolSize: Int
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -99,7 +101,8 @@ case class ServerConfig(
       refreshTokenTtlMs = 3600000, // 1 hour
       perfLoggingEnabled = true,
       idleTimeoutSeconds = 120,
-      accessLogging = null
+      accessLogging = null,
+      signingThreadPoolSize = 32
     )
   }
 
