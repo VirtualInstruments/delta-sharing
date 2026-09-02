@@ -75,7 +75,9 @@ case class ServerConfig(
     // Access logging configuration for tracking share data egress via structured logs.
     @BeanProperty var accessLogging: AccessLoggingConfig,
     // The number of threads used to sign file URLs in parallel (queryTable/queryTableChanges).
-    @BeanProperty var signingThreadPoolSize: Int
+    @BeanProperty var signingThreadPoolSize: Int,
+    // Query performance metrics exported to Google Cloud Monitoring.
+    @BeanProperty var metrics: MetricsConfig
 ) extends ConfigItem {
   import ServerConfig._
 
@@ -102,7 +104,8 @@ case class ServerConfig(
       perfLoggingEnabled = true,
       idleTimeoutSeconds = 120,
       accessLogging = null,
-      signingThreadPoolSize = 32
+      signingThreadPoolSize = 32,
+      metrics = null
     )
   }
 
@@ -135,6 +138,9 @@ case class ServerConfig(
     }
     if (accessLogging != null) {
       accessLogging.checkConfig()
+    }
+    if (metrics != null) {
+      metrics.checkConfig()
     }
   }
 }
@@ -315,6 +321,78 @@ case class TableConfig(
     }
     if (location == null) {
       throw new IllegalArgumentException("'location' in a table must be provided")
+    }
+  }
+}
+
+/**
+ * Configuration for query performance metrics.
+ *
+ * Metrics are pushed from the process to Google Cloud Monitoring: Google Managed Prometheus is
+ * disabled on these GKE clusters, so there is no scraper to expose an endpoint to.
+ *
+ * Disabled by default on purpose. The exporter needs `roles/monitoring.metricWriter` on the
+ * workload's service account; enabling it before that binding exists produces a failed API call
+ * every export interval and no data. Grant the role, then set `enabled: true`.
+ */
+case class MetricsConfig(
+    @BeanProperty var enabled: Boolean,
+    // Exporter to use: "stackdriver" (Google Cloud Monitoring) or "none".
+    @BeanProperty var exporter: String,
+    // GCP project that owns the custom metric descriptors.
+    @BeanProperty var projectId: String,
+    // How often metrics are pushed. Cloud Monitoring rejects points written more than once per
+    // 10 seconds for the same time series, so values below 10 are invalid.
+    @BeanProperty var exportIntervalSeconds: Int,
+    // Monitored resource type. `generic_task` gives every replica its own time series via
+    // `task_id`; `global` would make replicas collide and lose points.
+    @BeanProperty var resourceType: String,
+    // `location` label: the GCP region this server runs in (for example: us-central1).
+    @BeanProperty var location: String,
+    // `namespace` label of the monitored resource.
+    @BeanProperty var namespace: String,
+    // `job` label of the monitored resource.
+    @BeanProperty var job: String,
+    // `task_id` label. Defaults to $POD_NAME, then the hostname; set only to override.
+    @BeanProperty var taskId: String,
+    // Explicit monitored-resource labels. Anything set here overrides the values derived above.
+    @BeanProperty var resourceLabels: java.util.Map[String, String],
+    // Whether to add a `tenant` label to request metrics. Off by default: each tenant multiplies
+    // the number of billed Cloud Monitoring time series.
+    @BeanProperty var tenantLabelEnabled: Boolean,
+    // Tags added to every metric, for example the environment name.
+    @BeanProperty var commonTags: java.util.Map[String, String]) extends ConfigItem {
+
+  def this() = {
+    this(
+      enabled = false,
+      exporter = "stackdriver",
+      projectId = null,
+      exportIntervalSeconds = 60,
+      resourceType = "generic_task",
+      location = null,
+      namespace = "delta-sharing",
+      job = "delta-sharing-server",
+      taskId = null,
+      resourceLabels = Collections.emptyMap(),
+      tenantLabelEnabled = false,
+      commonTags = Collections.emptyMap())
+  }
+
+  override def checkConfig(): Unit = {
+    if (!enabled) {
+      return
+    }
+    if (exporter != null && exporter.trim.equalsIgnoreCase("stackdriver")) {
+      if (projectId == null || projectId.trim.isEmpty) {
+        throw new IllegalArgumentException(
+          "'projectId' in 'metrics' must be provided when the stackdriver exporter is enabled")
+      }
+    }
+    if (exportIntervalSeconds < 10) {
+      throw new IllegalArgumentException(
+        "'exportIntervalSeconds' in 'metrics' must be at least 10: Cloud Monitoring rejects " +
+          "points written more frequently than once per 10 seconds for the same time series")
     }
   }
 }

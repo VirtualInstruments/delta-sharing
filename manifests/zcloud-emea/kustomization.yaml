@@ -1,3 +1,4 @@
+# NOT DEPLOYED -- zcloud-emea runs no Delta Sharing server; see configmap.yaml (ZING-45349).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

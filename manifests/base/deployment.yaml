@@ -150,6 +150,13 @@ spec:
               secretKeyRef:
                 name: delta-sharing-auth
                 key: bearer-token
+          # Becomes the `task_id` label on every Cloud Monitoring time series. Without a
+          # per-pod value, replicas behind the HPA write to the same series and Cloud
+          # Monitoring drops the points as written-too-frequently.
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           ports:
             - containerPort: 8080
               name: http

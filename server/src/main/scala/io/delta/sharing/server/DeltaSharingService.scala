@@ -31,7 +31,7 @@ import scala.util.Try
 import com.linecorp.armeria.common.{HttpData, HttpHeaderNames, HttpHeaders, HttpMethod, HttpRequest, HttpResponse, HttpStatus, MediaType, ResponseHeaders, ResponseHeadersBuilder}
 import com.linecorp.armeria.common.auth.OAuth2Token
 import com.linecorp.armeria.internal.server.ResponseConversionUtil
-import com.linecorp.armeria.server.{Server, ServiceRequestContext}
+import com.linecorp.armeria.server.{HttpService, Server, ServiceRequestContext}
 import com.linecorp.armeria.server.annotation.{ConsumesJson, Default, ExceptionHandler, ExceptionHandlerFunction, Get, Head, Param, Post, ProducesJson}
 import com.linecorp.armeria.server.auth.AuthService
 import io.delta.kernel.exceptions.{KernelException, TableNotFoundException}
@@ -50,7 +50,8 @@ import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
 import io.delta.sharing.server.telemetry.{
-  AccessLogEmitter, AccessLogEntry, GcpPricingTier, PricingContextLogEntry, RequestHeadersLogEntry
+  AccessLogEmitter, AccessLogEntry, GcpPricingTier, MetricsRegistries, PricingContextLogEntry,
+  QueryClass, QueryMetrics, RequestHeadersLogEntry, RequestMetrics, RequestMetricsService
 }
 
 object ErrorCode {
@@ -198,6 +199,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
   private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
+
+  private[server] val queryMetrics: QueryMetrics = MetricsRegistries.create(serverConfig)
 
   private def extractRequestHeaders(req: HttpRequest): Map[String, String] = {
     req.headers().names().asScala
@@ -363,9 +366,16 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       schema: String,
       table: String,
       queryResult: QueryResult): Unit = {
-    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
+    val totalNs = System.nanoTime() - wallStartNs
+    val totalMs = totalNs / 1000000L
     val path = s"$share/$schema/$table"
     val numSigned = queryResult.actions.length - 2
+    queryMetrics.queryCompleted(
+      queryClass = QueryClass.Cdf,
+      engine = QueryClass.EngineStandalone,
+      totalNs = totalNs,
+      signedUrls = numSigned,
+      timings = queryResult.timings)
     if (serverConfig.perfLoggingEnabled) {
       queryResult.timings match {
         case Some(CdfTimings(t: CdfQueryTimings)) =>
@@ -397,10 +407,19 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       share: String,
       schema: String,
       table: String,
-      queryResult: QueryResult): Unit = {
-    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
+      queryResult: QueryResult,
+      queryClass: String,
+      engine: String): Unit = {
+    val totalNs = System.nanoTime() - wallStartNs
+    val totalMs = totalNs / 1000000L
     val path = s"$share/$schema/$table"
     val numSigned = queryResult.actions.length - 2
+    queryMetrics.queryCompleted(
+      queryClass = queryClass,
+      engine = engine,
+      totalNs = totalNs,
+      signedUrls = numSigned,
+      timings = queryResult.timings)
     if (serverConfig.perfLoggingEnabled) {
       queryResult.timings match {
         case Some(TableTimings(t: TableQueryTimings)) =>
@@ -704,6 +723,17 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
     val start = System.nanoTime()
 
+    // Classify before doing any work: the decorator needs the class even if the request fails.
+    val queryClass = QueryClass.forTableQuery(
+      hasVersion = request.version.isDefined,
+      hasTimestamp = request.timestamp.isDefined,
+      hasStartingVersion = request.startingVersion.isDefined,
+      hasPredicateHints = request.predicateHints.nonEmpty,
+      hasMaxFiles = request.maxFiles.isDefined,
+      hasPageToken = request.pageToken.isDefined)
+    RequestMetrics.setQueryClass(queryClass)
+    RequestMetrics.setTenant(extractTenantId(share))
+
     if(getAsyncQuery(capabilitiesMap)) {
       val queryId = s"${share}_${schema}_${table}"
 
@@ -741,11 +771,13 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       val clientReaderFeaturesSet = getReaderFeatures(capabilitiesMap)
       val includeEndStreamAction = getRequestEndStreamAction(capabilitiesMap)
       val timeoutLog = Some(serverConfig.requestTimeoutSeconds)
-      val queryResult = if (
-        request.predicateHints.isEmpty
-          && request.maxFiles.isEmpty
-          && request.startingVersion.isEmpty
-          && request.pageToken.isEmpty) {
+      // Mirrors the engine routing below, so the `engine` label always names the path taken.
+      val useKernelEngine =
+        request.predicateHints.isEmpty && request.maxFiles.isEmpty &&
+          request.startingVersion.isEmpty && request.pageToken.isEmpty
+      val engine =
+        if (useKernelEngine) QueryClass.EngineKernel else QueryClass.EngineStandalone
+      val queryResult = if (useKernelEngine) {
         val (loaded, updateNs) =
           deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = true)
         loaded.query(
@@ -796,7 +828,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       }
 
       emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
-      logTableQueryComplete(start, share, schema, table, queryResult)
+      logTableQueryComplete(start, share, schema, table, queryResult, queryClass, engine)
       streamingOutput(
         Some(queryResult.version),
         queryResult.responseFormat,
@@ -830,6 +862,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       req.headers().get(DELTA_SHARING_CAPABILITIES_HEADER)
     )
     val start = System.nanoTime()
+    RequestMetrics.setQueryClass(QueryClass.Cdf)
+    RequestMetrics.setTenant(extractTenantId(share))
     val tableConfig = sharedTableManager.getTable(share, schema, table)
     if (!tableConfig.historyShared) {
       throw new DeltaSharingIllegalArgumentException("cdf is not enabled on table " +
@@ -1245,7 +1279,11 @@ object DeltaSharingService {
     val service = new DeltaSharingService(serverConfig)
     // scalastyle:off runtimeaddshutdownhook
     Runtime.getRuntime.addShutdownHook(new Thread(
-      () => service.accessLogEmitter.close(),
+      () => {
+        service.accessLogEmitter.close()
+        // Flushes whatever the exporter has buffered since the last interval.
+        service.queryMetrics.close()
+      },
       "delta-access-log-shutdown"))
     // scalastyle:on runtimeaddshutdownhook
     lazy val server = {
@@ -1257,6 +1295,15 @@ object DeltaSharingService {
         .idleTimeout(java.time.Duration.ofSeconds(serverConfig.idleTimeoutSeconds))
         .requestTimeout(java.time.Duration.ofSeconds(serverConfig.requestTimeoutSeconds))
         .annotatedService(serverConfig.endpoint, service: Any)
+      // Outermost decorator, so requests rejected by authorization are still counted.
+      builder.decorator(new java.util.function.Function[HttpService, HttpService] {
+        override def apply(delegate: HttpService): HttpService = {
+          new RequestMetricsService(
+            delegate,
+            service.queryMetrics,
+            serverConfig.requestTimeoutSeconds)
+        }
+      })
       if (serverConfig.ssl == null) {
         builder.http(serverConfig.getPort)
       } else {

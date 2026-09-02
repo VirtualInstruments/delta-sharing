@@ -52,6 +52,15 @@ idleTimeoutSeconds: 120      # must exceed the proxy's IdleConnTimeout or client
 queryTablePageSizeLimit: 10000
 perfLoggingEnabled: true
 
+metrics:                        # query performance metrics -> Google Cloud Monitoring
+  enabled: false                # needs roles/monitoring.metricWriter first; see memory-bank/08
+  exporter: "stackdriver"
+  projectId: "..."              # GCP_PROJECT_ID_PLACEHOLDER in the manifests
+  exportIntervalSeconds: 60     # minimum 10 (Cloud Monitoring sampling period)
+  resourceType: "generic_task"  # per-pod task_id; `global` makes replicas collide
+  location: "us-central1"
+  tenantLabelEnabled: false     # a tenant label multiplies billed time series
+
 authorization:
   bearerToken: "<token>"     # injected from $BEARER_TOKEN at deploy time
 
