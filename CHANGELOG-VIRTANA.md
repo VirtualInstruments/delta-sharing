@@ -29,6 +29,33 @@ it lives in Virtana code or upstream code.
 
 Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 
+### Query performance metrics (Virtana addition)
+
+- `server/.../telemetry/QueryMetrics.scala` — `QueryMetrics` trait, Micrometer implementation and
+  the no-op used when metrics are disabled; flattens the existing `TableQueryTimings` /
+  `CdfQueryTimings` into per-stage latency distributions plus an `unattributed` residual
+- `server/.../telemetry/QueryClass.scala` — request taxonomy (snapshot / snapshot_filtered /
+  snapshot_asof / incremental / cdf / version / metadata / catalog) and classification from request
+  params or matched route
+- `server/.../telemetry/MetricsRegistries.scala` — builds the Google Cloud Monitoring
+  (Stackdriver) registry from config; any construction failure degrades to the no-op recorder
+  rather than failing startup
+- `server/.../telemetry/RequestMetrics.scala` — Armeria decorator recording duration, outcome,
+  status class, response bytes, TTFB, in-flight and timeout/near-timeout counters for **every**
+  endpoint, plus the request-context attributes handlers use to refine the query class
+- `ServerConfig` — new `metrics` block (`MetricsConfig`). Disabled by default so the first enable
+  is deliberate: it starts billable Cloud Monitoring ingestion, and `zcloud-emea` has no
+  `dl-sharing` service account at all (ZING-45349)
+- `DeltaSharingService` — registers the decorator outermost (so auth rejections are still counted),
+  classifies `query`/`changes` requests, feeds the existing completion paths into the recorder, and
+  flushes the exporter from the shutdown hook. No new timing calls were added to the query paths
+- `build.sbt` — `micrometer-registry-stackdriver` 1.6.5 (the version Armeria 1.6.0 already puts on
+  the classpath) with `google-cloud-monitoring` pinned to 3.0.4 and `gax-grpc` to 2.7.1; the
+  transitive default drags in gax-grpc 1.56, which is incompatible with the gax 2.7.1 that
+  `google-cloud-storage` requires
+- Design, metric catalog and rollout:
+  [memory-bank/08-query-performance-metrics.md](memory-bank/08-query-performance-metrics.md)
+
 ### Upstream server files, modified
 
 | File | Virtana change |
@@ -50,6 +77,11 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 
 ### Deployment & docs
 
+- `manifests/` — `metrics` block added to the base config and all five environment overlays
+  (`enabled: false` everywhere; enable per environment once its IAM binding is confirmed), and
+  `POD_NAME` exposed to the server container via the downward API so each replica gets its own
+  Cloud Monitoring `task_id` -- without it, HPA-scaled replicas collide on one time series and
+  Cloud Monitoring discards the points
 - `manifests/` — `requestTimeoutSeconds` raised from 180 to 300 (3 min → 5 min) across base and all environment overlays; the near-timeout warning logs (fired at 75% of the configured limit)
 - `manifests/` — Kustomize base + 6 environment overlays
 - `ci/` — Jenkinsfile, Makefile, `deploy.sh`, per-environment deployment YAML
@@ -61,6 +93,11 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
   `memory-bank/07-access-log-table-reference.md`); the old `docs/` is gone. The access log table
   description was corrected there: `access_log_br__system` is unpartitioned (matches
   `DeltaAccessLogWriter`), not partitioned by `year`/`month`/`day`.
+- [memory-bank/08-query-performance-metrics.md](memory-bank/08-query-performance-metrics.md) —
+  query performance monitoring (ZING-45093/ZING-45330): query taxonomy, per-stage latency
+  boundaries, the gap inventory, the metric catalog, cardinality rules, SLOs and alerts. P1 is
+  implemented (see the metrics section above); section 6.2 records what shipped and the two-step
+  rollout, section 6.1 the access-log schema change that is still outstanding.
 
 ## Known divergence risks when merging upstream
 

@@ -207,6 +207,28 @@ lazy val server = (project in file("server")) enablePlugins(JavaAppPackaging) se
        ExclusionRule("com.google.guava", "guava"),
       ExclusionRule("org.slf4j")
     ),
+    // Query performance metrics -> Google Cloud Monitoring. Micrometer 1.6.5 is the version
+    // Armeria 1.6.0 already puts on the classpath; keep them in lockstep when upgrading either.
+    // google-cloud-monitoring is pinned (rather than taken transitively) so that gax stays on the
+    // 2.7.1 that google-cloud-storage requires -- the transitive default drags in gax-grpc 1.56,
+    // which is not compatible with it.
+    "io.micrometer" % "micrometer-registry-stackdriver" % "1.6.5" excludeAll(
+      ExclusionRule("com.fasterxml.jackson.core"),
+      ExclusionRule("com.fasterxml.jackson.module"),
+      ExclusionRule("org.slf4j"),
+      ExclusionRule("com.google.cloud", "google-cloud-monitoring")
+    ),
+    "com.google.cloud" % "google-cloud-monitoring" % "3.0.4" excludeAll(
+      ExclusionRule("com.fasterxml.jackson.core"),
+      ExclusionRule("com.fasterxml.jackson.module"),
+      ExclusionRule("com.google.guava", "guava"),
+      ExclusionRule("org.slf4j")
+    ),
+    "com.google.api" % "gax-grpc" % "2.7.1" excludeAll(
+      ExclusionRule("com.fasterxml.jackson.core"),
+      ExclusionRule("com.fasterxml.jackson.module"),
+      ExclusionRule("com.google.guava", "guava")
+    ),
     "com.google.cloud" % "google-cloud-storage" % "2.2.2" excludeAll(
       ExclusionRule("com.fasterxml.jackson.core"),
       ExclusionRule("com.fasterxml.jackson.module")
