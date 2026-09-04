@@ -35,10 +35,6 @@ data:
       clientIpHeader: "x-forwarded-for"
       deltaTablePath: "gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system"
     # Query performance metrics pushed to Google Cloud Monitoring.
-    # PREREQUISITE: the `dl-sharing` GCP service account needs roles/monitoring.metricWriter --
-    # without it the exporter makes one failing API call per interval and stores nothing. The
-    # binding is declared in zing-infrastructure (zing/modules/zing/zing-svc-service-accounts.tf)
-    # and was verified applied in zing-dev-197522 on 2026-09-02 (ZING-45349).
     metrics:
       # First environment enabled (ZING-45349). The others stay disabled until the Cloud
       # Monitoring bill here has been checked -- custom metrics bill per time series.

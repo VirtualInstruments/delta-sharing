@@ -43,6 +43,7 @@ object QueryStage {
   val GetChanges = "get_changes"
   val CdcSpecBuild = "cdc_spec_build"
   val Signing = "signing"
+  val ResponseBuild = "response_build"
   val Unattributed = "unattributed"
 }
 
@@ -344,7 +345,8 @@ object MicrometerQueryMetrics {
         QueryStage.TimestampIndex -> t.timestampIndexNs,
         QueryStage.GetChanges -> t.getChangesNs,
         QueryStage.CdcSpecBuild -> t.cdcSpecBuildNs,
-        QueryStage.Signing -> t.signingNs)
+        QueryStage.Signing -> t.signingNs,
+        QueryStage.ResponseBuild -> t.responseBuildNs)
     case _ => Seq.empty
   }
 

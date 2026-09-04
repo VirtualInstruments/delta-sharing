@@ -1,16 +1,3 @@
-# NOT DEPLOYED -- verified 2026-09-02 (ZING-45349).
-#
-# zcloud-emea runs no Delta Sharing server: the cluster has neither the delta-sharing-server
-# deployment nor the `dl-sharing` Kubernetes service account, and the `dl-sharing` GCP service
-# account does not exist in the project. In zing-infrastructure every `dl-sharing` resource
-# (zing/modules/zing/zing-svc-service-accounts.tf) is gated on a project list that omits
-# zcloud-emea -- the GCP SA, its workload-identity binding, monitoring.metricWriter,
-# storage.objectAdmin and serviceAccountTokenCreator -- so GCS access would not work here
-# either, not just metrics.
-#
-# The overlay is kept rather than deleted so the region-specific values (europe-west3) survive
-# until Delta Sharing is actually rolled out to EMEA. Widen that Terraform gating first; nothing
-# in this file takes effect before then.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -40,9 +27,7 @@ data:
       detectGcpTraffic: true
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
-    # Query performance metrics pushed to Google Cloud Monitoring. Stays disabled: `dl-sharing`
-    # does not exist in zcloud-emea, so there is no identity to write metrics with. See the
-    # NOT DEPLOYED note at the top of this file (ZING-45349).
+    # Query performance metrics pushed to Google Cloud Monitoring
     metrics:
       enabled: false
       exporter: "stackdriver"

@@ -929,7 +929,7 @@ class DeltaSharedTable(
     )
     val versionsIterated = replayOut.specs.length
 
-    def cdfPartialTimings(signingNs: Long): CdfQueryTimings = {
+    def cdfPartialTimings(signingNs: Long, responseBuildNs: Long): CdfQueryTimings = {
       CdfQueryTimings(
         cdfStartVersion = cdfStart,
         cdfEndVersion = cdfEnd,
@@ -939,12 +939,18 @@ class DeltaSharedTable(
         getChangesNs = replayOut.getChangesMaterializeNs,
         timestampIndexNs = replayOut.timestampIndexNs,
         cdcSpecBuildNs = replayOut.cdcSpecBuildNs,
-        signingNs = signingNs)
+        signingNs = signingNs,
+        responseBuildNs = responseBuildNs)
     }
     def cdfEarlyReturn(pt: CdfQueryTimings): QueryResult = {
       warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(pt), "cdf")
       QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(pt)))
     }
+
+    // Wraps the first and third passes below (classify actions, then build signed response
+    // actions); signing wall time is carved out the same way `replayOrPrepareNs` does it for the
+    // snapshot path, so this doesn't double count.
+    val tResponseBuild = System.nanoTime()
 
     // First pass: collect files to sign and non-file actions, respecting page size
     replayOut.specs.foreach { cdcDataSpec =>
@@ -1069,23 +1075,25 @@ class DeltaSharedTable(
         )
     }
 
+    val responseBuildNs = System.nanoTime() - tResponseBuild - signingNs
+
     // Handle early return if page size was exceeded
     if (earlyReturnToken.isDefined) {
       actions.append(getEndStreamAction(earlyReturnToken.get, minUrlExpirationTimestamp))
-      return cdfEarlyReturn(cdfPartialTimings(signingNs))
+      return cdfEarlyReturn(cdfPartialTimings(signingNs, responseBuildNs))
     }
     // Return an `endStreamAction` object only when `maxFiles` is specified for
     // backwards compatibility.
     if (maxFiles.isDefined || includeEndStreamAction) {
       actions.append(getEndStreamAction(null, minUrlExpirationTimestamp))
     }
-    val cdfTimings = cdfPartialTimings(signingNs)
+    val cdfTimings = cdfPartialTimings(signingNs, responseBuildNs)
     warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(cdfTimings), "cdf")
     QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(cdfTimings)))
   }
 
   private def cdfInternalWorkNs(t: CdfQueryTimings): Long = {
-    t.deltaLogUpdateNs + t.protocolSnapshotNs + t.cdfReplayNs + t.signingNs
+    t.deltaLogUpdateNs + t.protocolSnapshotNs + t.cdfReplayNs + t.signingNs + t.responseBuildNs
   }
 
   private def tableInternalWorkNs(t: TableQueryTimings): Long = {

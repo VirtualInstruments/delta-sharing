@@ -54,7 +54,8 @@ class QueryMetricsSuite extends FunSuite {
         getChangesNs = 3000000L,
         timestampIndexNs = 4000000L,
         cdcSpecBuildNs = 5000000L,
-        signingNs = 6000000L))
+        signingNs = 6000000L,
+        responseBuildNs = 7000000L))
   }
 
   private def metricsConfig(tenantLabel: Boolean = false): MetricsConfig = {
@@ -81,6 +82,7 @@ class QueryMetricsSuite extends FunSuite {
     assert(stages(QueryStage.TimestampIndex) == 4000000L)
     assert(stages(QueryStage.CdcSpecBuild) == 5000000L)
     assert(stages(QueryStage.Signing) == 6000000L)
+    assert(stages(QueryStage.ResponseBuild) == 7000000L)
   }
 
   test("stage breakdown is empty when the query path reported no timings") {

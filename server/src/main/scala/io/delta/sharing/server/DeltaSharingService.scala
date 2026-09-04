@@ -387,6 +387,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
               s"timestampIndex=${t.timestampIndexNs / 1000000}ms " +
               s"cdcSpecBuild=${t.cdcSpecBuildNs / 1000000}ms " +
               s"signing=${t.signingNs / 1000000}ms " +
+              s"responseBuild=${t.responseBuildNs / 1000000}ms " +
               s"cdfReplay=${t.cdfReplayNs / 1000000}ms versions=${t.versionsIterated} " +
               s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
         case _ =>

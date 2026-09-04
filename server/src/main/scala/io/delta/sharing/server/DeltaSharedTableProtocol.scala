@@ -36,7 +36,9 @@ case class CdfQueryTimings(
     getChangesNs: Long,
     timestampIndexNs: Long,
     cdcSpecBuildNs: Long,
-    signingNs: Long) {
+    signingNs: Long,
+    /** Classifying replayed actions and building signed response actions around `signingNs`. */
+    responseBuildNs: Long) {
 
   def cdfReplayNs: Long = getChangesNs + timestampIndexNs + cdcSpecBuildNs
 }
