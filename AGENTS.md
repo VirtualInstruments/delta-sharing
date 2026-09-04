@@ -149,6 +149,39 @@ accessLogging:
 
 **Delta table** (`access_log_br__system`): a single consolidated, unpartitioned table with `tenantId` as a column for per-tenant filtering. Protocol (1,2) for Delta Standalone compatibility; pre-created by `deltalake-admin` — the writer does not create the schema.
 
+## Query Performance Metrics (Virtana Extension)
+
+Per-request and per-stage latency metrics pushed to Google Cloud Monitoring. Managed Prometheus is
+disabled on these clusters, so there is no scrape endpoint -- the process writes to the Cloud
+Monitoring API directly. Design and metric catalog:
+[memory-bank/08-query-performance-metrics.md](memory-bank/08-query-performance-metrics.md).
+
+```yaml
+metrics:
+  enabled: false                # see the rollout note below
+  exporter: "stackdriver"
+  projectId: "..."              # GCP_PROJECT_ID_PLACEHOLDER in the manifests
+  exportIntervalSeconds: 60     # minimum 10; Cloud Monitoring's sampling period
+  resourceType: "generic_task"  # per-pod `task_id`; `global` makes replicas collide
+  location: "us-central1"
+  tenantLabelEnabled: false     # a tenant label multiplies billed time series
+```
+
+**Rollout is two steps and ships disabled.** Confirm `roles/monitoring.metricWriter` on the
+`dl-sharing` GCP service account first, then set `enabled: true` in the environment's configmap.
+The binding is already declared in zing-infrastructure for zing-dev/preview/prod/prod2/prod3 but
+**not** for zcloud-emea, which has no `dl-sharing` service account at all (ZING-45349).
+
+**Key classes**:
+- `QueryMetrics` / `MicrometerQueryMetrics` — the single collection point; turns the
+  `TableQueryTimings` / `CdfQueryTimings` into stage latency distributions. A genuinely new stage
+  boundary belongs in those case classes (as `responseBuildNs` does) so it flows to the metric,
+  the log line and the near-timeout check at once — what to avoid is an ad-hoc `nanoTime()` that
+  only feeds a log message
+- `QueryClass` — the request taxonomy and its classification rules
+- `RequestMetricsService` — Armeria decorator covering every endpoint
+- `MetricsRegistries` — builds the exporter; degrades to a no-op recorder on any failure
+
 ## Kubernetes Deployment
 
 Manifests use Kustomize overlays at [manifests/](manifests/). Each environment overlay extends `manifests/base/`.

@@ -34,3 +34,18 @@ data:
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
       deltaTablePath: "gs://zing-dev-197522-dl-v1/datalake/data/tenant/_system"
+    # Query performance metrics pushed to Google Cloud Monitoring.
+    metrics:
+      # First environment enabled (ZING-45349). The others stay disabled until the Cloud
+      # Monitoring bill here has been checked -- custom metrics bill per time series.
+      enabled: true
+      exporter: "stackdriver"
+      projectId: "GCP_PROJECT_ID_PLACEHOLDER"
+      exportIntervalSeconds: 60
+      resourceType: "generic_task"
+      location: "us-central1"
+      namespace: "delta-sharing"
+      job: "delta-sharing-server"
+      # Adds a `tenant` label to request metrics. Each tenant multiplies the number of billed
+      # Cloud Monitoring time series, so turn it on deliberately.
+      tenantLabelEnabled: false

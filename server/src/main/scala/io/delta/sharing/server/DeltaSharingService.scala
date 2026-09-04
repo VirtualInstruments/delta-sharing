@@ -31,7 +31,7 @@ import scala.util.Try
 import com.linecorp.armeria.common.{HttpData, HttpHeaderNames, HttpHeaders, HttpMethod, HttpRequest, HttpResponse, HttpStatus, MediaType, ResponseHeaders, ResponseHeadersBuilder}
 import com.linecorp.armeria.common.auth.OAuth2Token
 import com.linecorp.armeria.internal.server.ResponseConversionUtil
-import com.linecorp.armeria.server.{Server, ServiceRequestContext}
+import com.linecorp.armeria.server.{HttpService, Server, ServiceRequestContext}
 import com.linecorp.armeria.server.annotation.{ConsumesJson, Default, ExceptionHandler, ExceptionHandlerFunction, Get, Head, Param, Post, ProducesJson}
 import com.linecorp.armeria.server.auth.AuthService
 import io.delta.kernel.exceptions.{KernelException, TableNotFoundException}
@@ -50,7 +50,8 @@ import io.delta.sharing.server.config.{AccessLoggingConfig, ServerConfig}
 import io.delta.sharing.server.model.{AddCDCFile, AddFile, AddFileForCDF, QueryStatus, RemoveFile, SingleAction}
 import io.delta.sharing.server.protocol._
 import io.delta.sharing.server.telemetry.{
-  AccessLogEmitter, AccessLogEntry, GcpPricingTier, PricingContextLogEntry, RequestHeadersLogEntry
+  AccessLogEmitter, AccessLogEntry, GcpPricingTier, MetricsRegistries, PricingContextLogEntry,
+  QueryClass, QueryMetrics, RequestHeadersLogEntry, RequestMetrics, RequestMetricsService
 }
 
 object ErrorCode {
@@ -198,6 +199,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
 
   private val logger = LoggerFactory.getLogger(classOf[DeltaSharingService])
   private val accessLogEmitter = AccessLogEmitter.create(serverConfig)
+
+  private[server] val queryMetrics: QueryMetrics = MetricsRegistries.create(serverConfig)
 
   private def extractRequestHeaders(req: HttpRequest): Map[String, String] = {
     req.headers().names().asScala
@@ -363,9 +366,18 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       schema: String,
       table: String,
       queryResult: QueryResult): Unit = {
-    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
+    val totalNs = System.nanoTime() - wallStartNs
+    val totalMs = totalNs / 1000000L
     val path = s"$share/$schema/$table"
-    val numSigned = queryResult.actions.length - 2
+    // `actions` also holds protocol, metadata (historical metadata included) and the end-stream
+    // action, so it only stands in for the signed-file count when the path did not report one.
+    val numSigned = queryResult.signedFiles.getOrElse(queryResult.actions.length - 2)
+    queryMetrics.queryCompleted(
+      queryClass = QueryClass.Cdf,
+      engine = QueryClass.EngineStandalone,
+      totalNs = totalNs,
+      signedUrls = queryResult.signedFiles,
+      timings = queryResult.timings)
     if (serverConfig.perfLoggingEnabled) {
       queryResult.timings match {
         case Some(CdfTimings(t: CdfQueryTimings)) =>
@@ -377,6 +389,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
               s"timestampIndex=${t.timestampIndexNs / 1000000}ms " +
               s"cdcSpecBuild=${t.cdcSpecBuildNs / 1000000}ms " +
               s"signing=${t.signingNs / 1000000}ms " +
+              s"responseBuild=${t.responseBuildNs / 1000000}ms " +
               s"cdfReplay=${t.cdfReplayNs / 1000000}ms versions=${t.versionsIterated} " +
               s"range=[${t.cdfStartVersion},${t.cdfEndVersion}] signedUrls=$numSigned")
         case _ =>
@@ -397,10 +410,19 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       share: String,
       schema: String,
       table: String,
-      queryResult: QueryResult): Unit = {
-    val totalMs = (System.nanoTime() - wallStartNs) / 1000000L
+      queryResult: QueryResult,
+      queryClass: String,
+      engine: String): Unit = {
+    val totalNs = System.nanoTime() - wallStartNs
+    val totalMs = totalNs / 1000000L
     val path = s"$share/$schema/$table"
-    val numSigned = queryResult.actions.length - 2
+    val numSigned = queryResult.signedFiles.getOrElse(queryResult.actions.length - 2)
+    queryMetrics.queryCompleted(
+      queryClass = queryClass,
+      engine = engine,
+      totalNs = totalNs,
+      signedUrls = queryResult.signedFiles,
+      timings = queryResult.timings)
     if (serverConfig.perfLoggingEnabled) {
       queryResult.timings match {
         case Some(TableTimings(t: TableQueryTimings)) =>
@@ -508,6 +530,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     @Param("table") table: String,
     @Param("startingTimestamp") @Nullable startingTimestamp: String
   ): HttpResponse = processRequest {
+    RequestMetrics.setTenant(extractTenantId(share))
     val tableConfig = sharedTableManager.getTable(share, schema, table)
     if (startingTimestamp != null && !tableConfig.historyShared) {
       throw new DeltaSharingIllegalArgumentException("Reading table by version or timestamp is" +
@@ -548,6 +571,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       @Param("version") @Nullable version: java.lang.Long,
       @Param("timestamp") @Nullable timestamp: String): HttpResponse = processRequest {
     import scala.collection.JavaConverters._
+    RequestMetrics.setTenant(extractTenantId(share))
     if (version != null && timestamp != null) {
       throw new DeltaSharingIllegalArgumentException(ErrorStrings.multipleParametersSetErrorMsg(
         Seq("version", "timestamp"))
@@ -596,6 +620,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
      @Param("table") table: String,
      @Param("queryId") queryId: String,
      request: GetQueryInfoRequest): HttpResponse = processRequest {
+    RequestMetrics.setQueryClass(QueryClass.Other)
+    RequestMetrics.setTenant(extractTenantId(share))
 
     if (table == "tableWithAsyncQueryError") {
       throw new DeltaSharingIllegalArgumentException("expected error")
@@ -659,6 +685,28 @@ class DeltaSharingService(serverConfig: ServerConfig) {
     val capabilitiesMap = getDeltaSharingCapabilitiesMap(
       req.headers().get(DELTA_SHARING_CAPABILITIES_HEADER)
     )
+
+    // Label the request before the validation below can reject it. A request that throws still
+    // reaches the metrics decorator, and without the label it would be attributed to whatever
+    // the route implies -- putting rejected requests in the `snapshot` bucket and corrupting
+    // its 4xx breakdown.
+    val queryClass = if (getAsyncQuery(capabilitiesMap)) {
+      // An async query returns only an acknowledgement, so its latency says nothing about the
+      // query it stands for; keeping it out of the real classes leaves those distributions clean.
+      QueryClass.Other
+    } else {
+      QueryClass.forTableQuery(
+        hasVersion = request.version.isDefined,
+        hasTimestamp = request.timestamp.isDefined,
+        hasStartingVersion = request.startingVersion.isDefined,
+        hasPredicateHints = request.predicateHints.nonEmpty,
+        hasJsonPredicateHints = request.jsonPredicateHints.isDefined,
+        hasMaxFiles = request.maxFiles.isDefined,
+        hasPageToken = request.pageToken.isDefined)
+    }
+    RequestMetrics.setQueryClass(queryClass)
+    RequestMetrics.setTenant(extractTenantId(share))
+
     val numVersionParams =
       Seq(request.version, request.timestamp, request.startingVersion).count(_.isDefined)
     if (numVersionParams > 1) {
@@ -741,11 +789,13 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       val clientReaderFeaturesSet = getReaderFeatures(capabilitiesMap)
       val includeEndStreamAction = getRequestEndStreamAction(capabilitiesMap)
       val timeoutLog = Some(serverConfig.requestTimeoutSeconds)
-      val queryResult = if (
-        request.predicateHints.isEmpty
-          && request.maxFiles.isEmpty
-          && request.startingVersion.isEmpty
-          && request.pageToken.isEmpty) {
+      // Mirrors the engine routing below, so the `engine` label always names the path taken.
+      val useKernelEngine =
+        request.predicateHints.isEmpty && request.maxFiles.isEmpty &&
+          request.startingVersion.isEmpty && request.pageToken.isEmpty
+      val engine =
+        if (useKernelEngine) QueryClass.EngineKernel else QueryClass.EngineStandalone
+      val queryResult = if (useKernelEngine) {
         val (loaded, updateNs) =
           deltaSharedTableLoader.loadTableWithUpdateCost(tableConfig, useKernel = true)
         loaded.query(
@@ -796,7 +846,7 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       }
 
       emitQueryEgressMetric(req, share, schema, table, queryResult.actions)
-      logTableQueryComplete(start, share, schema, table, queryResult)
+      logTableQueryComplete(start, share, schema, table, queryResult, queryClass, engine)
       streamingOutput(
         Some(queryResult.version),
         queryResult.responseFormat,
@@ -823,6 +873,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       @Param("pageToken") @Nullable pageToken: String
   ): HttpResponse = processRequest {
     // scalastyle:on argcount
+    // Label first, for the same reason as in listFiles: a request rejected below still reaches
+    // the metrics decorator, and without the tenant it would be recorded as tenant="unknown".
+    RequestMetrics.setQueryClass(QueryClass.Cdf)
+    RequestMetrics.setTenant(extractTenantId(share))
     if (maxFiles != null && maxFiles <= 0) {
       throw new DeltaSharingIllegalArgumentException("maxFiles must be positive.")
     }
@@ -1245,7 +1299,11 @@ object DeltaSharingService {
     val service = new DeltaSharingService(serverConfig)
     // scalastyle:off runtimeaddshutdownhook
     Runtime.getRuntime.addShutdownHook(new Thread(
-      () => service.accessLogEmitter.close(),
+      () => {
+        service.accessLogEmitter.close()
+        // Flushes whatever the exporter has buffered since the last interval.
+        service.queryMetrics.close()
+      },
       "delta-access-log-shutdown"))
     // scalastyle:on runtimeaddshutdownhook
     lazy val server = {
@@ -1289,6 +1347,18 @@ object DeltaSharingService {
           })
         builder.decorator(authServiceBuilder.newDecorator)
       }
+      // Registered last on purpose. Armeria composes repeated `decorator` calls so that the
+      // most recently registered one runs outermost, so this has to come after the
+      // authorization decorator for rejected requests to be counted at all -- registering it
+      // earlier silently drops every 401 from the metrics (see RequestMetricsIntegrationSuite).
+      builder.decorator(new java.util.function.Function[HttpService, HttpService] {
+        override def apply(delegate: HttpService): HttpService = {
+          new RequestMetricsService(
+            delegate,
+            service.queryMetrics,
+            serverConfig.requestTimeoutSeconds)
+        }
+      })
       builder.build()
     }
     server.start().get()

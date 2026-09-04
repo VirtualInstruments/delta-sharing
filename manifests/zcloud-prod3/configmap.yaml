@@ -28,3 +28,16 @@ data:
       clientRegionHeader: "x-client-region"
       clientIpHeader: "x-forwarded-for"
       deltaTablePath: "gs://zcloud-prod3-dl-v1/datalake/data/tenant/_system"
+    # Query performance metrics pushed to Google Cloud Monitoring.
+    metrics:
+      enabled: false
+      exporter: "stackdriver"
+      projectId: "GCP_PROJECT_ID_PLACEHOLDER"
+      exportIntervalSeconds: 60
+      resourceType: "generic_task"
+      location: "australia-southeast1"
+      namespace: "delta-sharing"
+      job: "delta-sharing-server"
+      # Adds a `tenant` label to request metrics. Each tenant multiplies the number of billed
+      # Cloud Monitoring time series, so turn it on deliberately.
+      tenantLabelEnabled: false

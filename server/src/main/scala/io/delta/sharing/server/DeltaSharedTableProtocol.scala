@@ -24,7 +24,16 @@ case class QueryResult(
     version: Long,
     actions: Seq[Object],
     responseFormat: String,
-    timings: Option[QueryResultTimings] = None)
+    timings: Option[QueryResultTimings] = None,
+    /**
+     * Number of files the server pre-signed for this response.
+     *
+     * `actions.length` is not a substitute: it also carries protocol, metadata (including
+     * historical metadata on CDF responses) and the end-stream action, so deriving the count
+     * from it over-reports the work done. `None` means the path does not track it, in which
+     * case no work-volume metric is recorded rather than a wrong one.
+     */
+    signedFiles: Option[Int] = None)
 
 /** Observability breakdown for /changes (CDF) requests */
 case class CdfQueryTimings(
@@ -36,7 +45,9 @@ case class CdfQueryTimings(
     getChangesNs: Long,
     timestampIndexNs: Long,
     cdcSpecBuildNs: Long,
-    signingNs: Long) {
+    signingNs: Long,
+    /** Classifying replayed actions and building signed response actions around `signingNs`. */
+    responseBuildNs: Long) {
 
   def cdfReplayNs: Long = getChangesNs + timestampIndexNs + cdcSpecBuildNs
 }

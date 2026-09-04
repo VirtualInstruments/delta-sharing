@@ -12,6 +12,7 @@ Read the file that matches your task.
 | [05-gcp-egress-pricing.md](05-gcp-egress-pricing.md) | GCP egress pricing tiers and how classification is implemented |
 | [06-egress-monitoring.md](06-egress-monitoring.md) | Per-share egress monitoring: tier resolution, config, Delta writer behaviour, log formats |
 | [07-access-log-table-reference.md](07-access-log-table-reference.md) | `access_log_br__system` table reference: schema, locations, example queries, retention |
+| [08-query-performance-metrics.md](08-query-performance-metrics.md) | **Proposal** — query taxonomy, per-stage latency boundaries, proposed metric catalog, SLOs/alerts (ZING-45093) |
 
 Related: [../AGENTS.md](../AGENTS.md) (agent instructions), [../CHANGELOG-VIRTANA.md](../CHANGELOG-VIRTANA.md)
 (authoritative divergence log).
