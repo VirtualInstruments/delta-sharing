@@ -70,7 +70,7 @@ the latency.
 ### 2.3 CDF query
 
 Stages: `deltaLogUpdate` → `protocolSnapshot` (`getSnapshotForVersionAsOf`) → `timestampIndex` →
-`getChanges` (materialize) → `cdcSpecBuild` → `signing`. Boundaries already exist as
+`getChanges` (materialize) → `cdcSpecBuild` → `signing` → `responseBuild`. Boundaries exist as
 `CdfQueryTimings` ([`DeltaSharedTableProtocol.scala:30-42`](../server/src/main/scala/io/delta/sharing/server/DeltaSharedTableProtocol.scala#L30)),
 fed from `DeltaSharingCDCReader`.
 
@@ -145,7 +145,7 @@ One metric with a `stage` label rather than one metric per stage, so a dashboard
 
 `stage` ∈ `delta_log_update`, `snapshot_resolve`, `protocol_snapshot`, `timestamp_index`,
 `change_replay`, `replay_or_prepare`, `predicate_filter`, `cdc_spec_build`, `signing`,
-`serialize`, `egress_log`.
+`response_build`, `serialize`, `egress_log`.
 `path` ∈ `standalone`, `kernel`.
 
 Closing G2/G3 means Kernel's `query`/`queryCDF`/`getTableVersion` must populate `TableQueryTimings`
@@ -342,7 +342,15 @@ data with nothing to scrape it.
 The collection point is single, as section 6 called for: the query paths were not touched. The two
 existing completion methods (`logTableQueryComplete`, `logCdfRequestComplete`) now hand their
 already-measured `QueryResultTimings` to `queryMetrics.queryCompleted`, and the decorator covers
-everything else. No new `nanoTime()` calls were added to `DeltaSharedTable`.
+everything else.
+
+The one query-path change since is the `response_build` stage: `CdfQueryTimings` gained
+`responseBuildNs`, covering the classification of replayed actions and the construction of signed
+response actions around `signingNs` in `queryCDF`. It was added because the `unattributed`
+residual pointed straight at it, and it follows the rule above rather than breaking it -- the
+boundary lives in the timing case class, so it reaches the stage metric, the perf log line and the
+near-timeout check together. `stage="response_build"` is a real value on
+`delta_sharing.query.stage.duration` for the `cdf` class.
 
 **Metrics emitted**, as `custom.googleapis.com/delta_sharing/...` in Cloud Monitoring:
 
@@ -400,15 +408,27 @@ overlay is inert: it is now marked `NOT DEPLOYED` at the top of both its files r
 so the region-specific values survive for a future rollout. Enabling metrics there is not a matter
 of one IAM binding -- without the SA and `storage.objectAdmin`, GCS reads would not work either.
 
-**Enabled so far:** `zing-dev` only (in `manifests/base/configmap.yaml`, which zing-dev consumes
-directly -- it has no overlay patch). Every other environment still renders `enabled: false`;
-verify with `kustomize build manifests/<env>`. The remaining environments are unblocked on IAM and
-gated only on the cost check: Cloud Monitoring bills per time series, so the zing-dev bill gets a
-look before `zing-preview`, `zcloud-prod`, `zcloud-prod2` and `zcloud-prod3` follow.
+**Enabled so far** -- check any claim here with `kustomize build manifests/<env>` rather than by
+reading an overlay, since zing-dev takes its value from `manifests/base/configmap.yaml`:
 
-The config ships with `enabled: false` in every environment so that the first enable is a
-deliberate, one-environment-at-a-time act: it starts billable Cloud Monitoring ingestion, and in
-`zcloud-emea` it would write nothing at all. Nothing else about the server changes while it is off
+| Environment | `metrics.enabled` |
+|-------------|-------------------|
+| zing-dev | true (from `manifests/base/configmap.yaml`; it has no overlay patch) |
+| zing-preview | true |
+| zcloud-prod | true |
+| zcloud-prod2 | false |
+| zcloud-prod3 | false |
+| zcloud-emea | false |
+
+`roles/monitoring.metricWriter` was confirmed applied -- not merely declared in Terraform -- on
+`dl-sharing@zing-dev-197522.iam.gserviceaccount.com`. The two remaining prod environments are
+unblocked on IAM and gated only on the cost check: Cloud Monitoring bills per time series, so the
+bill from the enabled environments gets a look before `zcloud-prod2` and `zcloud-prod3` follow.
+
+The `MetricsConfig` *default* is disabled, so a deployment that omits the block gets no exporter
+at all; enabling is a per-environment decision because it starts billable ingestion, and in
+`zcloud-emea` it would write nothing regardless. Nothing else about the server changes while it is
+off
 -- `MetricsRegistries.create` returns a no-op recorder, and an exporter that fails to construct is
 logged and degraded to that same no-op rather than taking the server down.
 
@@ -473,8 +493,8 @@ worse than publishing none.
 **P1 — request + standalone stages + work volume. DONE** (see §6.2). Micrometer registry exporting
 to Cloud Monitoring, `query_class` classification, request histogram/counters/gauges, stage
 histogram wired from the existing `TableQueryTimings`/`CdfQueryTimings`, files/versions histograms.
-No new timing instrumentation was needed in the query paths — the boundaries in §2.1–2.3 already
-existed. This closes G1, G4, G6 and most of G7, and G3 for latency (the `version` and `metadata`
+The P1 metrics needed no new timing instrumentation — the boundaries in §2.1–2.3 already existed;
+the `response_build` stage was added afterwards, on the evidence the metrics themselves produced. This closes G1, G4, G6 and most of G7, and G3 for latency (the `version` and `metadata`
 endpoints now have request-level timing, though still no stage breakdown).
 
 The access-log latency columns were the one part of P1 left undone: they cross into

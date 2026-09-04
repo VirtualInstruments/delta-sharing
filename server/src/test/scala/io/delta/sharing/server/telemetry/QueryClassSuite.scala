@@ -25,10 +25,11 @@ class QueryClassSuite extends FunSuite {
       timestamp: Boolean = false,
       startingVersion: Boolean = false,
       predicateHints: Boolean = false,
+      jsonPredicateHints: Boolean = false,
       maxFiles: Boolean = false,
       pageToken: Boolean = false): String = {
-    QueryClass.forTableQuery(version, timestamp, startingVersion, predicateHints, maxFiles,
-      pageToken)
+    QueryClass.forTableQuery(version, timestamp, startingVersion, predicateHints,
+      jsonPredicateHints, maxFiles, pageToken)
   }
 
   test("a bare query is a snapshot query") {
@@ -57,16 +58,23 @@ class QueryClassSuite extends FunSuite {
     assert(classify(pageToken = true) == QueryClass.SnapshotFiltered)
   }
 
-  test("classification matches the engine routing in listFiles") {
-    // The kernel engine serves exactly the requests with none of these four parameters set, which
-    // is precisely the Snapshot and SnapshotAsOf classes.
+  test("a json predicate alone makes a filtered snapshot") {
+    // The kernel engine serves these and applies the predicate itself, so classifying them as a
+    // bare snapshot would mix filtered work into the snapshot latency distribution.
+    assert(classify(jsonPredicateHints = true) == QueryClass.SnapshotFiltered)
+  }
+
+  test("classification describes the request, not the engine that serves it") {
     assert(classify() == QueryClass.Snapshot)
     assert(classify(version = true) == QueryClass.SnapshotAsOf)
-    // Anything that sets one of the four routes to Delta Standalone instead.
+    // Each of the four parameters that route to Delta Standalone moves the class off Snapshot.
     assert(classify(predicateHints = true) != QueryClass.Snapshot)
     assert(classify(maxFiles = true) != QueryClass.Snapshot)
     assert(classify(startingVersion = true) != QueryClass.Snapshot)
     assert(classify(pageToken = true) != QueryClass.Snapshot)
+    // jsonPredicateHints deliberately does NOT line up with the engine split: the kernel engine
+    // still serves it, so snapshot_filtered legitimately appears with engine=kernel.
+    assert(classify(jsonPredicateHints = true) == QueryClass.SnapshotFiltered)
   }
 
   test("routes map to the class fixed by the endpoint") {

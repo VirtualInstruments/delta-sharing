@@ -16,27 +16,22 @@
 
 package io.delta.sharing.server.telemetry
 
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 import scala.collection.JavaConverters._
 
 import com.linecorp.armeria.client.WebClient
 import com.linecorp.armeria.common.HttpStatus
-import com.linecorp.armeria.server.{HttpService, Server}
+import com.linecorp.armeria.common.auth.OAuth2Token
+import com.linecorp.armeria.server.{HttpService, Server, ServiceRequestContext}
 import com.linecorp.armeria.server.annotation.{Get, ProducesJson}
+import com.linecorp.armeria.server.auth.AuthService
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.scalatest.FunSuite
 
 import io.delta.sharing.server.config.MetricsConfig
 
-/**
- * Exercises the decorator against a real Armeria server.
- *
- * The suites that drive the actual sharing endpoints are cancelled without cloud credentials, so
- * without this the decorator would ship never having run: whether `RequestLog` yields a status, a
- * duration and a response length the way the recorder expects is not something the unit tests can
- * answer.
- */
 class RequestMetricsIntegrationSuite extends FunSuite {
 
   class TestService {
@@ -161,5 +156,47 @@ class RequestMetricsIntegrationSuite extends FunSuite {
     }
     val timers = registry.find(MicrometerQueryMetrics.RequestDuration).timers().asScala
     assert(timers.map(_.count()).sum == 5L)
+  }
+
+  test("an authorization rejection is still counted") {
+    // Regression test for decorator ordering. Armeria runs the most recently registered
+    // decorator outermost, so the metrics decorator has to be registered after the
+    // authorization decorator -- the other way round, every 401 is dropped silently and the
+    // error rate looks perfect while clients are being turned away.
+    val registry = new SimpleMeterRegistry()
+    val config = new MetricsConfig()
+    config.setEnabled(true)
+    config.setProjectId("test-project")
+    val metrics = new MicrometerQueryMetrics(registry, config)
+
+    val builder = Server.builder()
+      .http(0)
+      .annotatedService("/test", new TestService(): Any)
+    // Same registration order as DeltaSharingService.start: authorization first, metrics last.
+    builder.decorator(
+      AuthService.builder.addOAuth2((_: ServiceRequestContext, token: OAuth2Token) => {
+        CompletableFuture.completedFuture(token.accessToken == "good-token")
+      }).newDecorator)
+    builder.decorator(new java.util.function.Function[HttpService, HttpService] {
+      override def apply(delegate: HttpService): HttpService =
+        new RequestMetricsService(delegate, metrics, 300L)
+    })
+
+    val server = builder.build()
+    server.start().get()
+    try {
+      val client = WebClient.of(s"http://127.0.0.1:${server.activeLocalPort()}")
+      assert(client.get("/test/ok").aggregate().get().status().code() == 401)
+    } finally {
+      server.stop().get()
+    }
+
+    val timer = registry.find(MicrometerQueryMetrics.RequestDuration).timer()
+    assert(timer != null, "an unauthorized request was not recorded at all")
+    assert(timer.count() == 1L)
+    assert(timer.getId.getTag("outcome") == RequestOutcome.ClientError)
+    assert(
+      registry.find(MicrometerQueryMetrics.RequestCount).counter().getId.getTag("status_class") ==
+        "4xx")
   }
 }

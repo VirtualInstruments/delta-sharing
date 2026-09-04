@@ -33,7 +33,14 @@ object QueryClass {
   val Metadata = "metadata"
   /** `POST /query` with no version, predicate, paging or streaming parameters. */
   val Snapshot = "snapshot"
-  /** `POST /query` narrowed by predicate hints, `maxFiles` or a page token. */
+  /**
+   * `POST /query` narrowed by predicate hints, `maxFiles` or a page token.
+   *
+   * Note this does not line up with the engine split: `jsonPredicateHints` alone still routes to
+   * the Kernel engine, which applies the predicate itself, so this class appears with both
+   * `engine=standalone` and `engine=kernel`. Classifying by what the client asked for rather than
+   * by which engine served it is deliberate -- a filtered query is a filtered query.
+   */
   val SnapshotFiltered = "snapshot_filtered"
   /** `POST /query` pinned to a `version` or `timestamp`. */
   val SnapshotAsOf = "snapshot_asof"
@@ -66,13 +73,14 @@ object QueryClass {
       hasTimestamp: Boolean,
       hasStartingVersion: Boolean,
       hasPredicateHints: Boolean,
+      hasJsonPredicateHints: Boolean,
       hasMaxFiles: Boolean,
       hasPageToken: Boolean): String = {
     if (hasStartingVersion) {
       Incremental
     } else if (hasVersion || hasTimestamp) {
       SnapshotAsOf
-    } else if (hasPredicateHints || hasMaxFiles || hasPageToken) {
+    } else if (hasPredicateHints || hasJsonPredicateHints || hasMaxFiles || hasPageToken) {
       SnapshotFiltered
     } else {
       Snapshot

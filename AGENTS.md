@@ -173,9 +173,11 @@ The binding is already declared in zing-infrastructure for zing-dev/preview/prod
 **not** for zcloud-emea, which has no `dl-sharing` service account at all (ZING-45349).
 
 **Key classes**:
-- `QueryMetrics` / `MicrometerQueryMetrics` — the single collection point; turns the existing
-  `TableQueryTimings` / `CdfQueryTimings` into stage latency distributions. Do not add `nanoTime()`
-  calls to the query paths; extend the timing case classes instead
+- `QueryMetrics` / `MicrometerQueryMetrics` — the single collection point; turns the
+  `TableQueryTimings` / `CdfQueryTimings` into stage latency distributions. A genuinely new stage
+  boundary belongs in those case classes (as `responseBuildNs` does) so it flows to the metric,
+  the log line and the near-timeout check at once — what to avoid is an ad-hoc `nanoTime()` that
+  only feeds a log message
 - `QueryClass` — the request taxonomy and its classification rules
 - `RequestMetricsService` — Armeria decorator covering every endpoint
 - `MetricsRegistries` — builds the exporter; degrades to a no-op recorder on any failure

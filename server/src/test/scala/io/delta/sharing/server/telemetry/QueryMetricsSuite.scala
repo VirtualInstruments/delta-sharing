@@ -107,7 +107,7 @@ class QueryMetricsSuite extends FunSuite {
       queryClass = QueryClass.Incremental,
       engine = QueryClass.EngineStandalone,
       totalNs = 15000000L,
-      signedUrls = 3,
+      signedUrls = Some(3),
       timings = Some(tableTimings()))
 
     val stageTimers = registry.find(MicrometerQueryMetrics.StageDuration).timers().asScala
@@ -133,7 +133,7 @@ class QueryMetricsSuite extends FunSuite {
       queryClass = QueryClass.Snapshot,
       engine = QueryClass.EngineStandalone,
       totalNs = 1000000L,
-      signedUrls = 1,
+      signedUrls = Some(1),
       timings = Some(tableTimings()))
 
     val residual = registry.find(MicrometerQueryMetrics.StageDuration)
@@ -150,7 +150,7 @@ class QueryMetricsSuite extends FunSuite {
       queryClass = QueryClass.Cdf,
       engine = QueryClass.EngineStandalone,
       totalNs = 50000000L,
-      signedUrls = 42,
+      signedUrls = Some(42),
       timings = Some(cdfTimings()))
 
     val signed = registry.find(MicrometerQueryMetrics.FilesSigned).summary()
@@ -226,7 +226,7 @@ class QueryMetricsSuite extends FunSuite {
     val metrics = new MicrometerQueryMetrics(registry, config)
 
     metrics.queryCompleted(
-      QueryClass.Snapshot, QueryClass.EngineKernel, 1000000L, 1, Some(tableTimings()))
+      QueryClass.Snapshot, QueryClass.EngineKernel, 1000000L, Some(1), Some(tableTimings()))
 
     val timer = registry.find(MicrometerQueryMetrics.StageDuration).timers().asScala.head
     assert(timer.getId.getTag("environment") == "zing-dev")
@@ -236,7 +236,44 @@ class QueryMetricsSuite extends FunSuite {
     NoopQueryMetrics.requestStarted("/query")
     NoopQueryMetrics.requestFinished(
       "/query", QueryClass.Snapshot, RequestOutcome.Ok, "2xx", None, 1L, Some(1L), 1L, false)
-    NoopQueryMetrics.queryCompleted(QueryClass.Cdf, QueryClass.EngineStandalone, 1L, 0, None)
+    NoopQueryMetrics.queryCompleted(
+      QueryClass.Cdf, QueryClass.EngineStandalone, 1L, Some(0), None)
     NoopQueryMetrics.close()
+  }
+
+  test("files_signed is omitted rather than guessed when the path did not report a count") {
+    // The kernel path does not track it. Recording a number derived from actions.length would
+    // over-report, because actions also carry protocol, metadata and the end-stream action.
+    val registry = new SimpleMeterRegistry()
+    val metrics = new MicrometerQueryMetrics(registry, metricsConfig())
+
+    metrics.queryCompleted(
+      queryClass = QueryClass.Snapshot,
+      engine = QueryClass.EngineKernel,
+      totalNs = 5000000L,
+      signedUrls = None,
+      timings = None)
+
+    assert(registry.find(MicrometerQueryMetrics.FilesSigned).summary() == null)
+  }
+
+  test("a failing registry does not propagate out of the recorder") {
+    // The trait documents a no-throw contract: these calls sit in the request path, so a
+    // telemetry failure must never surface as a failed customer query.
+    val exploding = new SimpleMeterRegistry() {
+      override def newDistributionSummary(
+          id: io.micrometer.core.instrument.Meter.Id,
+          config: io.micrometer.core.instrument.distribution.DistributionStatisticConfig,
+          scale: Double): io.micrometer.core.instrument.DistributionSummary =
+        throw new IllegalStateException("registry is broken")
+    }
+    val metrics = new MicrometerQueryMetrics(exploding, metricsConfig())
+
+    metrics.requestStarted("/query")
+    metrics.requestFinished(
+      "/query", QueryClass.Snapshot, RequestOutcome.Ok, "2xx", None, 1000L, None, 4096L,
+      nearTimeout = false)
+    metrics.queryCompleted(
+      QueryClass.Cdf, QueryClass.EngineStandalone, 1000L, Some(3), Some(cdfTimings()))
   }
 }

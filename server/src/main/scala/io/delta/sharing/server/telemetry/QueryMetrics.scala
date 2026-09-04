@@ -18,11 +18,13 @@ package io.delta.sharing.server.telemetry
 
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.collection.JavaConverters._
+import scala.util.control.NonFatal
 
 import io.micrometer.core.instrument.{Counter, DistributionSummary, Gauge, MeterRegistry, Tag, Tags, Timer}
+import org.slf4j.LoggerFactory
 
 import io.delta.sharing.server.{CdfTimings, QueryResultTimings, TableTimings}
 import io.delta.sharing.server.config.MetricsConfig
@@ -102,14 +104,14 @@ trait QueryMetrics {
    * @param queryClass see [[QueryClass]]
    * @param engine `standalone` or `kernel`
    * @param totalNs wall time of the query, used to derive the unattributed residual
-   * @param signedUrls number of pre-signed URLs in the response
+   * @param signedUrls number of pre-signed URLs in the response, when the path tracked it
    * @param timings stage boundaries captured by the query path, when available
    */
   def queryCompleted(
       queryClass: String,
       engine: String,
       totalNs: Long,
-      signedUrls: Int,
+      signedUrls: Option[Int],
       timings: Option[QueryResultTimings]): Unit
 
   /** Flush and release the exporter. */
@@ -137,7 +139,7 @@ object NoopQueryMetrics extends QueryMetrics {
       queryClass: String,
       engine: String,
       totalNs: Long,
-      signedUrls: Int,
+      signedUrls: Option[Int],
       timings: Option[QueryResultTimings]): Unit = {}
 }
 
@@ -157,6 +159,30 @@ class MicrometerQueryMetrics(
 
   private val inFlight = new ConcurrentHashMap[String, AtomicInteger]()
 
+  /** Logged once; a registry that fails tends to fail on every subsequent call. */
+  private val reportedFailure = new AtomicBoolean(false)
+
+  /**
+   * Runs a recording block, swallowing any failure.
+   *
+   * The trait documents a no-throw contract, and it has to be enforced here rather than assumed:
+   * `requestStarted` runs before the request is served and `queryCompleted` before the response
+   * is returned, so an exception escaping either one would turn a telemetry problem into a failed
+   * customer query.
+   */
+  private def guarded(operation: String)(body: => Unit): Unit = {
+    try {
+      body
+    } catch {
+      case NonFatal(e) =>
+        if (reportedFailure.compareAndSet(false, true)) {
+          MicrometerQueryMetrics.logger.warn(
+            s"Recording query metrics failed ($operation); metrics may be incomplete. " +
+              "Further failures are not logged.", e)
+        }
+    }
+  }
+
   private val commonTags: Tags = {
     val extra = Option(config.getCommonTags)
       .map(_.asScala.toSeq)
@@ -165,7 +191,7 @@ class MicrometerQueryMetrics(
     Tags.of(extra.asJava)
   }
 
-  override def requestStarted(endpoint: String): Unit = {
+  override def requestStarted(endpoint: String): Unit = guarded("requestStarted") {
     inFlightCounter(endpoint).incrementAndGet()
   }
 
@@ -179,7 +205,7 @@ class MicrometerQueryMetrics(
       durationNs: Long,
       ttfbNs: Option[Long],
       responseBytes: Long,
-      nearTimeout: Boolean): Unit = {
+      nearTimeout: Boolean): Unit = guarded("requestFinished") {
     inFlightCounter(endpoint).decrementAndGet()
 
     val base = commonTags.and("endpoint", endpoint).and("query_class", queryClass)
@@ -232,16 +258,16 @@ class MicrometerQueryMetrics(
       queryClass: String,
       engine: String,
       totalNs: Long,
-      signedUrls: Int,
-      timings: Option[QueryResultTimings]): Unit = {
+      signedUrls: Option[Int],
+      timings: Option[QueryResultTimings]): Unit = guarded("queryCompleted") {
     val base = commonTags.and("query_class", queryClass)
 
-    if (signedUrls >= 0) {
+    signedUrls.filter(_ >= 0).foreach { signed =>
       DistributionSummary.builder(FilesSigned)
         .tags(base)
         .publishPercentileHistogram()
         .register(registry)
-        .record(signedUrls.toDouble)
+        .record(signed.toDouble)
     }
 
     val stages = stageBreakdown(timings)
@@ -265,7 +291,7 @@ class MicrometerQueryMetrics(
     }
   }
 
-  override def close(): Unit = {
+  override def close(): Unit = guarded("close") {
     registry.close()
   }
 
@@ -290,6 +316,8 @@ class MicrometerQueryMetrics(
 }
 
 object MicrometerQueryMetrics {
+  private val logger = LoggerFactory.getLogger(classOf[MicrometerQueryMetrics])
+
   val RequestDuration = "delta_sharing.request.duration"
   val RequestCount = "delta_sharing.requests"
   val RequestsInFlight = "delta_sharing.requests.in_flight"

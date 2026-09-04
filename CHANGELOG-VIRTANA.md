@@ -46,13 +46,24 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 - `ServerConfig` — new `metrics` block (`MetricsConfig`). Disabled by default so the first enable
   is deliberate: it starts billable Cloud Monitoring ingestion, and `zcloud-emea` has no
   `dl-sharing` service account at all (ZING-45349)
-- `DeltaSharingService` — registers the decorator outermost (so auth rejections are still counted),
+- `DeltaSharingService` — registers the metrics decorator **after** the authorization decorator.
+  Armeria runs the most recently registered decorator outermost, so registering it earlier drops
+  every 401 from the metrics silently (regression test in `RequestMetricsIntegrationSuite`),
   classifies `query`/`changes` requests, feeds the existing completion paths into the recorder, and
-  flushes the exporter from the shutdown hook. No new timing calls were added to the query paths
+  flushes the exporter from the shutdown hook. The metrics themselves needed no new timing calls in
+  the query paths; `responseBuildNs` was added afterwards as a real stage (below)
 - `build.sbt` — `micrometer-registry-stackdriver` 1.6.5 (the version Armeria 1.6.0 already puts on
   the classpath) with `google-cloud-monitoring` pinned to 3.0.4 and `gax-grpc` to 2.7.1; the
   transitive default drags in gax-grpc 1.56, which is incompatible with the gax 2.7.1 that
   `google-cloud-storage` requires
+- `DeltaSharedTableProtocol.scala` / `standalone/internal/DeltaSharedTable.scala` — new
+  `response_build` CDF stage (`CdfQueryTimings.responseBuildNs`): the classification of replayed
+  actions and construction of signed response actions around `signingNs`. Added on the evidence of
+  the `unattributed` residual, which showed most CDF time falling outside the existing boundaries
+- `QueryResult.signedFiles` — the accurate pre-signed-file count, carried out of the standalone and
+  CDF paths. `actions.length - 2` also counts protocol, metadata (historical metadata included) and
+  the end-stream action, so it over-reported the `files_signed` metric; the Kernel path reports
+  `None` and the metric is then skipped rather than guessed
 - Design, metric catalog and rollout:
   [memory-bank/08-query-performance-metrics.md](memory-bank/08-query-performance-metrics.md)
 
@@ -77,8 +88,11 @@ Each has a matching suite under `server/src/test/scala/.../telemetry/`.
 
 ### Deployment & docs
 
-- `manifests/` — `metrics` block added to the base config and all five environment overlays
-  (`enabled: false` everywhere; enable per environment once its IAM binding is confirmed), and
+- `manifests/` — `metrics` block added to the base config and all five environment overlays.
+  Enabled in `zing-dev` (via base), `zing-preview` and `zcloud-prod`; still disabled in
+  `zcloud-prod2`, `zcloud-prod3` and `zcloud-emea` (which has no `dl-sharing` service account).
+  `kustomize build manifests/<env>` is the authoritative check, since zing-dev inherits from base.
+  Also
   `POD_NAME` exposed to the server container via the downward API so each replica gets its own
   Cloud Monitoring `task_id` -- without it, HPA-scaled replicas collide on one time series and
   Cloud Monitoring discards the points

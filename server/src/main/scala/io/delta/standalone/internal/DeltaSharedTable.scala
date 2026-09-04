@@ -439,11 +439,11 @@ class DeltaSharedTable(
     } else {
       DeltaSharedTable.RESPONSE_FORMAT_DELTA
     }
-    val (tailActions, tableTimings) = {
+    val (tailActions, tableTimings, signedFileCount) = {
       if (startingVersion.isDefined) {
         // Only read changes up to snapshot.version, and ignore changes that are committed during
         // queryDataChangeSinceStartVersion.
-        val (changeActions, tsNs, replayNs, signNs, verCount, qStart, qEnd) =
+        val (changeActions, tsNs, replayNs, signNs, verCount, qStart, qEnd, signedCount) =
           queryDataChangeSinceStartVersion(
             startingVersion.get,
             endingVersion,
@@ -462,7 +462,8 @@ class DeltaSharedTable(
             signNs,
             Some(verCount),
             Some(qStart),
-            Some(qEnd)))
+            Some(qEnd)),
+          signedCount)
       } else if (includeFiles) {
         val tPrepare = System.nanoTime()
         val ts = if (isVersionQuery) {
@@ -578,11 +579,13 @@ class DeltaSharedTable(
             fileSigningNs,
             None,
             None,
-            None))
+            None),
+          filteredFiles.length)
       } else {
         (
           Nil,
-          TableQueryTimings(deltaLogUpdateNs, snapshotResolveNs, 0L, 0L, None, None, None))
+          TableQueryTimings(deltaLogUpdateNs, snapshotResolveNs, 0L, 0L, None, None, None),
+          0)
       }
     }
 
@@ -599,7 +602,8 @@ class DeltaSharedTable(
       snapshot.version,
       actions,
       responseFormat,
-      Some(TableTimings(tableTimings)))
+      Some(TableTimings(tableTimings)),
+      Some(signedFileCount))
   }
 
   private def queryDataChangeSinceStartVersion(
@@ -610,7 +614,7 @@ class DeltaSharedTable(
       queryParamChecksum: String,
       responseFormat: String,
       includeEndStreamAction: Boolean
-    ): (Seq[Object], Long, Long, Long, Int, Long, Long) = {
+    ): (Seq[Object], Long, Long, Long, Int, Long, Long, Int) = {
     // For subsequent page calls, instead of using the current latestVersion, use latestVersion in
     // the pageToken (which is equal to the latestVersion when the first page call is received),
     // in case the latestVersion changes after the first page call.
@@ -794,7 +798,8 @@ class DeltaSharedTable(
         signingNs,
         versionsIterated,
         start,
-        end)
+        end,
+        numSignedFiles)
     }
 
     val scanWallNs = System.nanoTime() - tScan
@@ -811,7 +816,8 @@ class DeltaSharedTable(
       signingNs,
       versionsIterated,
       start,
-      end)
+      end,
+      numSignedFiles)
   }
 
   def queryCDF(
@@ -944,7 +950,8 @@ class DeltaSharedTable(
     }
     def cdfEarlyReturn(pt: CdfQueryTimings): QueryResult = {
       warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(pt), "cdf")
-      QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(pt)))
+      QueryResult(
+        start, actions.toSeq, responseFormat, Some(CdfTimings(pt)), Some(numSignedFiles))
     }
 
     // Wraps the first and third passes below (classify actions, then build signed response
@@ -1089,7 +1096,8 @@ class DeltaSharedTable(
     }
     val cdfTimings = cdfPartialTimings(signingNs, responseBuildNs)
     warnIfNearRequestTimeout(requestTimeoutSecondsForLogging, cdfInternalWorkNs(cdfTimings), "cdf")
-    QueryResult(start, actions.toSeq, responseFormat, Some(CdfTimings(cdfTimings)))
+    QueryResult(
+      start, actions.toSeq, responseFormat, Some(CdfTimings(cdfTimings)), Some(numSignedFiles))
   }
 
   private def cdfInternalWorkNs(t: CdfQueryTimings): Long = {
