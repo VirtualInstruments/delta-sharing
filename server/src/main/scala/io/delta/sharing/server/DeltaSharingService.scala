@@ -620,6 +620,8 @@ class DeltaSharingService(serverConfig: ServerConfig) {
      @Param("table") table: String,
      @Param("queryId") queryId: String,
      request: GetQueryInfoRequest): HttpResponse = processRequest {
+    RequestMetrics.setQueryClass(QueryClass.Other)
+    RequestMetrics.setTenant(extractTenantId(share))
 
     if (table == "tableWithAsyncQueryError") {
       throw new DeltaSharingIllegalArgumentException("expected error")
@@ -871,6 +873,10 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       @Param("pageToken") @Nullable pageToken: String
   ): HttpResponse = processRequest {
     // scalastyle:on argcount
+    // Label first, for the same reason as in listFiles: a request rejected below still reaches
+    // the metrics decorator, and without the tenant it would be recorded as tenant="unknown".
+    RequestMetrics.setQueryClass(QueryClass.Cdf)
+    RequestMetrics.setTenant(extractTenantId(share))
     if (maxFiles != null && maxFiles <= 0) {
       throw new DeltaSharingIllegalArgumentException("maxFiles must be positive.")
     }
@@ -878,8 +884,6 @@ class DeltaSharingService(serverConfig: ServerConfig) {
       req.headers().get(DELTA_SHARING_CAPABILITIES_HEADER)
     )
     val start = System.nanoTime()
-    RequestMetrics.setQueryClass(QueryClass.Cdf)
-    RequestMetrics.setTenant(extractTenantId(share))
     val tableConfig = sharedTableManager.getTable(share, schema, table)
     if (!tableConfig.historyShared) {
       throw new DeltaSharingIllegalArgumentException("cdf is not enabled on table " +

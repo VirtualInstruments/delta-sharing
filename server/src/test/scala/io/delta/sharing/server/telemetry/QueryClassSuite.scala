@@ -90,6 +90,15 @@ class QueryClassSuite extends FunSuite {
     assert(QueryClass.forRoute("/delta-sharing/shares/{share}/all-tables") == QueryClass.Catalog)
   }
 
+  test("the async query-status route does not fall into the catalog bucket") {
+    // It reads table state; catalog is otherwise sub-second config lookups, and mixing the two
+    // makes the catalog distribution meaningless. Both Armeria pattern styles are covered.
+    val braces = "/delta-sharing/shares/{share}/schemas/{schema}/tables/{table}/queries/{queryId}"
+    val colons = "/delta-sharing/shares/:share/schemas/:schema/tables/:table/queries/:queryId"
+    assert(QueryClass.forRoute(braces) == QueryClass.Other)
+    assert(QueryClass.forRoute(colons) == QueryClass.Other)
+  }
+
   test("an unknown or absent route does not throw") {
     assert(QueryClass.forRoute(null) == QueryClass.Other)
     assert(QueryClass.forRoute("/healthz") == QueryClass.Other)

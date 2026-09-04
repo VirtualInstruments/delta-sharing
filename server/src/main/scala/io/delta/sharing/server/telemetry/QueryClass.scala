@@ -106,6 +106,11 @@ object QueryClass {
     } else if (pattern.endsWith("/query")) {
       // Refined by the handler once the request body has been parsed.
       Snapshot
+    } else if (pattern.contains("/queries/")) {
+      // The async query-status route. It reads table state rather than listing config, so it
+      // must not fall through to the catalog bucket below -- catalog latency is otherwise all
+      // sub-second config lookups, and mixing real table work into it makes that unreadable.
+      Other
     } else if (pattern.contains("/shares")) {
       Catalog
     } else {

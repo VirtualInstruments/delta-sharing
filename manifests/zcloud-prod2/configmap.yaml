@@ -30,7 +30,7 @@ data:
       deltaTablePath: "gs://zcloud-prod2-dl-v1/datalake/data/tenant/_system"
     # Query performance metrics pushed to Google Cloud Monitoring.
     metrics:
-      enabled: false
+      enabled: true
       exporter: "stackdriver"
       projectId: "GCP_PROJECT_ID_PLACEHOLDER"
       exportIntervalSeconds: 60
